@@ -2,7 +2,7 @@
 
 A tower defense game I originally wrote in LÖVE2D, rebuilt from scratch in C so it actually runs
 properly on a Nintendo 3DS — with a Borderlands-style layered damage model, a BL2-inspired title
-screen and in-game UI, and sound.
+screen full of element weapon cards, and streaming music with sound effects.
 
 The first attempt ran the LÖVE version through LovePotion. It booted! And then crawled at a few
 frames per second with half the playfield off-screen and touch controls fighting LÖVE's mouse
@@ -54,7 +54,7 @@ Rendered by the game's own frame code (top screen above, touchscreen below) — 
 harness runs the same `game.h`/`gfx.h` rendering the 3DS backend uses, so this is exactly what the
 console draws:
 
-| Menu: five element emblems | Build phase: six damage types | Wave: layered creeps |
+| Menu: element weapon cards | Build phase: six damage types | Wave: layered creeps |
 |---|---|---|
 | ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![combat](docs/screenshots/wave.png) |
 
@@ -89,26 +89,33 @@ Playing under an emulator (I use Azahar)? I map **WASD** to the d-pad, **U/H/J/K
 
 ### Sound
 
-The 3DS build has audio: looping menu/game music plus sound effects for building, selling, upgrading,
-lasers, enemies dying, wave starts, leaks, game over and victory. The effects and music are converted
-from the original LÖVE project's assets (the two little sting sounds were generated); `tools/make_audio.py`
-does the conversion into raw PCM that gets linked into the `.3dsx`.
+The 3DS build has audio. The music is the **actual full soundtrack**, not a short loop: the two OGG
+tracks (a 2:08 menu theme and a 4:07 game theme) are linked into the `.3dsx` and streamed through the
+[libctru `ndsp`](https://libctru.devkitpro.org/) mixer with **Tremor** (the fixed-point Vorbis decoder),
+decoded a quarter-second at a time from the main loop. If the OGG decoder can't start it falls back to
+short embedded PCM loops, so music never drops out entirely.
+
+Sound effects cover building, selling, upgrading, lasers, enemies dying, wave starts, leaks, game over
+and victory. They come from the original LÖVE project's assets (the two little sting sounds were
+generated); `tools/make_audio.py` builds the linked audio blobs.
 
 One caveat: the 3DS audio service needs the **DSP1 firmware** loaded. On Luma3DS that usually means
 having DSP1 installed/enabled; if it's missing, the game detects `ndspInit()` failing and just runs
-silently instead of crashing.
+silently instead of crashing. (The Azahar/Citra emulator doesn't provide DSP firmware by default, so
+sound is a real-hardware thing.)
 
 ## Status
 
 Playable end to end: maze building on the road, 25 waves, six damage types against layered enemies,
-status effects, upgrades, lives, game over, victory, sound, and a custom Homebrew Launcher icon. The v0.4 pass redesigned the title screen and
-gave the palette/board Borderlands-style element emblems drawn as original pixel art. It boots at a stable 60 fps in the Azahar
-emulator, which is where all my testing so far happened — real-hardware input and GPU output are the
-next thing I'll verify on the actual console. What's still missing:
+status effects, upgrades, lives, game over, victory, streaming music + sfx, and a custom Homebrew
+Launcher icon. The title screen is an element-card rack (five BL2-style cards with the emblems and
+their matchups), and the in-game panels use the same chamfered gold/hazard-stripe language. It boots at
+a stable 60 fps in the Azahar emulator, which is where most of my testing happened — real-hardware
+input and GPU output are the next thing to keep an eye on. What's still missing:
 
 - [ ] real-hardware playtest tuning — the balance only exists in the sim so far
-- [ ] real-hardware audio check (DSP1 caveat above) — sound was only verified by linking, not by listening
-- [ ] general polish: another pass on the menus, and the bottom panel starts to feel cramped at 320px
+- [ ] real-hardware audio pass — the streaming backend was only verified by building/linking so far
+- [ ] general polish: another pass on the in-game panels, and the bottom panel starts to feel cramped at 320px
 
 ## Building it
 
@@ -116,7 +123,7 @@ You need [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS de
 normal devkitPro install:
 
 ```sh
-pacman -S 3ds-dev
+pacman -S 3ds-dev 3ds-libvorbisidec
 cd Attempt-2-3ds-game
 make
 ```
@@ -139,9 +146,9 @@ source/render.c  top screen: board, towers, layered enemies, status effects, bea
 source/ui.c      bottom screen: six-tower palette, upgrade/sell, wave control
 source/app.c     the scene state machine and input → action mapping
 source/main.c    aptMainLoop / hid polling / frame timing
-source/audio_3ds.c  libctru ndsp mixer (SFX pool + looping music) for the 3DS build
+source/audio_3ds.c  libctru ndsp mixer + Tremor streaming music for the 3DS build
 source/audio.c   portable no-op fallback so the PC preview harness links without audio
-data/            raw PCM16 clips converted from the original sounds (linked in via bin2o)
+data/            PCM16 sfx + the two OGG tracks, linked into the binary via bin2o
 tests/           the core's unit tests (46 of them), built and run on the host
 tools/sim.c      headless auto-play balance sim (mixed army, maze AI, GUN-only control)
 tools/preview/   a tiny PC software renderer that dumps PNG frames - my "emulator"
@@ -182,6 +189,7 @@ rock-paper-scissors table was about as deep as a puddle.
 
 - [devkitPro](https://devkitpro.org/), libctru, citro3d and citro2d — without these, no 3DS homebrew.
 - [font8x8](https://github.com/dhepper/font8x8) by Daniel Hepper (public domain) for the bitmap font.
+- [Tremor](https://wiki.xiph.org/Tremor) / `libvorbisidec` for Ogg Vorbis music decoding, and libogg.
 - Damage model inspired by Borderlands 2's elemental system (HP/shield/armor layers, fire/shock/
   corrosive/slag/explosive), rebuilt from scratch for a 2D grid game.
 - The original Elemental Defense was my own LÖVE2D project.
