@@ -1,23 +1,26 @@
-# Elemental Defense — 3DS Port Specification (v4)
+# Elemental Defense — 3DS Port Specification (v5)
 
 **Single source of truth for the C implementation (devkitARM + libctru + citro2d).**
 
 | Item | Value |
 |---|---|
-| Original source | `C:\Users\Raine\Desktop\ElementalDefense\game\main.lua` (LÖVE2D, 1519 lines, 51,302 bytes) — read in full |
-| Original audio | `C:\Users\Raine\Desktop\ElementalDefense\game\sounds\` (16 files, §12) |
-| Current implementation | `include/game.h` (frozen core API), `include/gfx.h`, `source/core/{game,grid,data}.c`, `source/{render,ui,app,main,plat_3ds,audio}.c`, `tests/test_core.c`, `tools/sim.c`, `tools/preview/*` |
+| Original LÖVE game | `C:\Users\Raine\Desktop\ElementalDefense\game\main.lua` (LÖVE2D, 1519 lines) — waves, economy, upgrades, maze/path behaviour |
+| Combat design sheet | `docs/elements-spec.md` (v0.3 Borderlands-2-style damage model) |
+| Current implementation | `include/game.h`, `include/gfx.h`, `source/core/{game,grid,data}.c`, `source/{render,ui,app,main,plat_3ds,audio}.c`, `tests/test_core.c`, `tools/sim.c`, `tools/preview/*` |
 | 3DS target | top 400x240 (display), bottom 320x240 (touch), fixed 1/60 s simulation |
 | This document | `Attempt-2-3ds-game/docs/design.md` |
 
-**v4 changelog (this revision):** the **dynamic BFS maze mechanic is restored** — the road is recomputed after every build and sell, towers may stand on road cells, blocked builds are refused, and walking enemies are re-projected onto the rerouted road. Enemy movement is now **absolute cells/second** (`SPEED_SCALE 0.25`), a deliberate deviation from the Lua's path-normalised speed so mazing actually buys tower time. Everything else in this revision matches the code now in the repo (`source/core/*`, `source/render.c`, `source/ui.c`, `source/app.c`, `tests/test_core.c`). v3's hand-authored serpentine road is gone; §2, §5.3, §6, §10, §11, §14, §15 and the appendices were rewritten for the maze game. All Lua-derived content numbers are unchanged and were re-verified against `main.lua`.
+**v5 changelog (this revision):** the combat model is completely replaced by the v0.3 **Borderlands-2-inspired** design: six damage types (normal, fire, electric, corrosive, slag, explosive), enemies made of 1–3 concentric **HP / SHIELD / ARMOR layers**, damage carried layer-to-layer with per-layer multipliers, status effects (burn, stun, acid puddle, slag), explosive AoE, and a six-tower roster. The LÖVE original's three-element rock-paper-scissors and `EnemySpec` are gone. The **maze/BFS game and all wave/economy/upgrade rules are unchanged** (v0.2 locks still hold). One deliberate balance deviation from `elements-spec.md`: a global enemy-HP multiplier of **2.0** (`kEnemyHpScale`, allowed by the spec's balance guardrail) so that mixed element armies matter — see §5.2 and §14.2. Every number below was checked against the shipped `source/core/data.c` + `game.c`, `tests/test_core.c` (46 tests) and the sim results in `source/core/NOTES.md`.
 
 **Tagging convention**
 
-- `[LUA]` — value/behaviour copied verbatim from `main.lua`.
-- `[DERIVED]` — computed exactly from a `[LUA]` formula.
-- `[PORT]` — a new decision required by the 3DS/engine design; all are listed in §14.2/§14.5.
-- `[CODE]` — behaviour that currently exists in the repo (file/function named).
+- `[LUA]` — from the original LÖVE game (`main.lua`).
+- `[SPEC]` — from `docs/elements-spec.md`.
+- `[CODE]` — verified against the shipped C in this repo (file/function/constant named).
+- `[BALANCE]` — deliberate tuning deviation, signed off by the balance guardrails in elements-spec §4.
+- `[DERIVED]` — computed arithmetically from the above.
+
+The Borderlands 2 comparison is inspiration only: **these numbers are our own design**, they were not extracted from BL2.
 
 ---
 
@@ -25,848 +28,780 @@
 
 ### 0.1 Locked decisions (authoritative)
 
-| # | Decision | Lua original (for the record) |
+| # | Decision | Source |
 |---|---|---|
-| L1 | **Dynamic BFS maze restored.** A 4-connected BFS from entrance `(0,12)` to exit `(25,12)` runs on run start and after every successful build/sell. Towers may stand on road cells; the road reroutes around them. | `main.lua:63-123` BFS from `(1,13)` to `(26,13)`, recomputed on build/sell |
-| L2 | **Entrance `(0,12)` and exit `(25,12)` can never be built on.** Everything else may be walled. A placement that would leave the exit unreachable is refused with `"that would block the path"`, costs nothing and does not mutate the board. | BFS seeded the start cell unconditionally, so a tower could be built on the spawn cell (enemy spawned inside it); the exit could not be built on |
-| L3 | **After any reroute, living enemies are re-projected** onto the nearest point of the new road, keeping their progress (no snap back to the entrance). | Lua recomputed the world position from normalised `t` on the new path; no explicit re-projection |
-| L4 | **Enemy speed is absolute cells/second**: `(20 + wave - 1) * 0.25`, elite x1.8 (`SPEED_SCALE = 0.25`). Deliberate deviation from the Lua so mazing genuinely buys tower time. | `t += dt * speed/100`, `t` normalised over the whole path -> crossing time always `100/speed` s |
-| L5 | **25 waves**. Lives 20 at start; every leak (elite or not) costs exactly 1 life and pays no gold; 0 lives -> game over; clearing wave 25 -> victory. | Endless waves; no lives; leaks paid +2/+10 gold and restarted the same wave forever |
-| L6 | **Explicit build phase between waves**, player-paced ("NEXT WAVE"). Building/upgrading/selling is *also* allowed during a wave (as in the Lua). No inter-wave timer. | Waves auto-chained in the same frame; no build phase |
-| L7 | Damage, multipliers, costs, kill rewards, upgrade curve, enemy HP/speed formulas, spawn interval: **keep the Lua numbers** (this spec). | — |
-| L8 | **Element quotas are exact** and `game_wave_preview()` is truthful. The port defines wave size as `3 + 2*wave` **including** elites (the Lua added elites on top; see §6.1 and §14.5 Q1). | `baseEnemies = 3 + wave*2`, `enemiesPerWave = base + eliteCount`, HUD quotas from `base - eliteCount` |
-| L9 | Pause overlay (separate from speed), speeds 1x/2x/4x, `L/R` = tower type, `Select` = speed, `Start` = pause. | Speed levels {0, 0.5, 1, 2, 4}; L/R speed; SELECT help; no pause state |
+| L1 | **Dynamic BFS maze restored.** 4-connected BFS from entrance `(0,12)` to exit `(25,12)` on run start and after every build/sell. Towers may stand on road cells; the road reroutes around them. | `[CODE]` `core_build_path()`; LÖVE original `main.lua:63-123` |
+| L2 | **Entrance `(0,12)` and exit `(25,12)` are never buildable.** A build that leaves the exit unreachable is refused with `"that would block the path"`, costs nothing, mutates nothing. | `[CODE]` `game_place_tower()` / `game_can_place_at()` |
+| L3 | **Enemies are re-projected** onto the new road after any reroute (nearest point, keep progress). | `[CODE]` `reproject_enemies()` |
+| L4 | **Enemy movement is absolute cells/second**: `(20 + wave-1) * 0.25`, elite ×1.8. Longer mazes give real extra time under fire. | `[BALANCE]`/`[CODE]` `SPEED_SCALE`; deviation from the Lua's normalised speed |
+| L5 | **25 waves**, 20 lives, every leak = −1 life and 0 gold, 0 lives -> game over, clear wave 25 -> victory. | `[CODE]`; v0.2 locks |
+| L6 | **Build phase between waves**, player-paced NEXT WAVE; build/upgrade/sell also allowed mid-wave. No inter-wave timer. | `[CODE]` |
+| L7 | **Borderlands-style combat** `[SPEC]`: six damage types (normal/fire/electric/corrosive/slag/explosive), enemies are 1–3 concentric layers of HP/SHIELD/ARMOR, per-layer multipliers, damage carry-over, status effects, explosive AoE. | `docs/elements-spec.md`; `[CODE]` |
+| L8 | **Layer composition is deterministic and the preview is exact.** Layer count by wave, layer types from a hash of `(seed, wave, spawn slot)`; `game_wave_preview()` reports exactly what will spawn. | `[CODE]` `core_enemy_layer_types()` / `game_wave_preview()` |
+| L9 | **Balance guardrail applied**: global enemy HP ×**2.0** (`kEnemyHpScale`), damage table/economy untouched. | `[BALANCE]`; evidence §14.6 |
+| L10 | Speed levels 1x/2x/4x + separate pause overlay; L/R = tower type, Select = speed, Start = pause. | `[CODE]` |
+| L11 | The six-tower/damage-type system is **our design**, inspired by BL2; the LÖVE original had only Fire/Water/Forest with identical stats. | `[LUA]` vs `[SPEC]` |
 
 ### 0.2 Conventions
 
-- The **core** is cell space (`include/game.h`): 1.0 = one grid cell; cell `(col,row)` is 0-based, top-left origin, centre `(col+0.5, row+0.5)`.
-- The **renderer** is pixels (`include/gfx.h`): top 400x240, bottom 320x240, origin top-left, +y down.
-- Convert only in the renderer: `px = BOARD_X (5) + cellX * 15` (top), bottom UI uses its own rects (§11).
-- Lengths are px or cells as stated. Times are seconds. Colours are Lua floats 0..1 -> `GfxColor`.
-- The Lua has two state variables: outer `gameState` ("MENU"/"PLAYING") and inner `state` ("MOVING"/"BUILDING"/"TOWER_SELECTED"). In C these are `GamePhase` plus the (cursor, selection) pair; there is no separate build-mode enum in the shipped code (§10).
-- `pathPos` = distance travelled **in cells** along `Game.path` (0 .. `path.length`); `path.length == path.count - 1` because every BFS step is exactly one cell.
+- **Core is cell space** (`include/game.h`): 1.0 = one grid cell; cell `(col,row)` is 0-based, centre `(col+0.5, row+0.5)`.
+- **Renderer is pixels** (`include/gfx.h`): top 400x240, bottom 320x240, top-left origin, +y down.
+- Range: original 60 px / 28 px cell = **2.142857 cells**, constant for every tower and level.
+- `pathPos` = distance travelled along `Game.path` in cells (0 .. `path.length`); every BFS step is one cell.
+- Layer order: `layers[0]` is the **outermost** ring and takes damage first; damage carries inward.
+- Status timers/stack counts are per enemy; puddles are per game (`Game.puddles`).
+- Numbers are rounded only where stated; the C uses full `float` precision.
 
-### 0.3 Engine contract — `include/game.h` (frozen; append-only additions already made)
+### 0.3 Engine contract — `include/game.h` (frozen; no API changes needed for v0.3)
 
-`include/game.h` is the contract between the portable core and the 3DS front end. Do not reorder or rename fields; append-only additions are allowed (the core already appended two).
+| Item | Meaning / value |
+|---|---|
+| `TOWER_TYPE_COUNT` | **6** — the six damage-type towers are also the tower "types" |
+| `DamageType` | `DMG_NORMAL=0`, `DMG_FIRE=1`, `DMG_ELECTRIC=2`, `DMG_CORROSIVE=3`, `DMG_SLAG=4`, `DMG_EXPLOSIVE=5` |
+| `LayerType` | `LAYER_HP=0`, `LAYER_SHIELD=1`, `LAYER_ARMOR=2`; `MAX_LAYERS 3` |
+| `Tower` | `damageType`, `level` 1..10, `col,row`, `cooldown` (s), `invested`, `animPhase`. No element/tower-name field — the damage type is the identity |
+| `EnemyLayer` | `{ uint8_t type; float hp, maxHp; }` |
+| `Enemy` | `elite`, `layerCount` 1..3, `layers[MAX_LAYERS]` (outermost first), `pathPos`, `x,y`, `hitFlash`, `burnStacks` 0..5, `burnTimer`, `stunTimer`, `slagTimer` |
+| `Beam` | `damageType`, `kind` (0 = line beam, 1 = explosion ring), `x1,y1,x2,y2`, `radius` (cells, explosion only), `life/maxLife` |
+| `Puddle` | `{ active, x, y, radius, life, maxLife, dps }`; `Game.puddles[MAX_PUDDLES=16]`, `Game.puddleNext` round-robin slot |
+| `TowerSpec` | `name`, `cost`, `damage` (L1), `fireRate` (L1 cooldown seconds), `range` (cells), **`damageType`**, **`aoeRadius`** (0 = single-target), `color[3]`, `glow[3]` |
+| `game_tower_stats()` | effective `damage`/`fireRate`/`range` at a level (range constant) |
+| `game_damage_multiplier(damageType, layerType)` | 2.0 strong / 1.0 neutral / 0.5 weak; out-of-range clamps to 0 |
+| `game_wave_preview(g, &hpLayers, &shieldLayers, &armorLayers, &elites)` | **total layer counts across the whole wave** (all spawns, elites included) + elite count; exact |
+| `Game.layerQuota[3]` | staged at `game_start_next_wave()` from the same function as the preview; **informational only**, nothing in the sim reads it |
+| `Game.rng` | the run seed (set by `game_new_run`) and **never advanced during a run** — layer composition is a pure function of it, which is what makes the preview exact |
+| Removed from v0.2 | `Element`, `EnemySpec`, `game_enemy_spec()`. There is no enemy "element" any more; only layers |
+| `MAX_TOWERS 96`, `MAX_ENEMIES 128`, `MAX_BEAMS 128`, `MAX_PUDDLES 16` | fixed pools, no dynamic allocation |
+| `sizeof(Game)` | **18,960 bytes** (`[DERIVED]` host compile) — keep the single instance static/global, not on the stack |
 
-| Item | Meaning / value | Section |
-|---|---|---|
-| `GRID_COLS`, `GRID_ROWS` | 26, 13; cell centres `(col+0.5,row+0.5)` | §2 |
-| `GamePhase` | `PHASE_MENU`, `PHASE_BUILD`, `PHASE_WAVE`, `PHASE_GAMEOVER`, `PHASE_VICTORY` | §1 |
-| `STARTING_GOLD`, `STARTING_LIVES` | 150, 20 | §7 |
-| `Game.gold/lives/wave/totalWaves/enemiesAlive/enemiesToSpawn/kills/leaks` | run state; `totalWaves = 25`; `wave` is 1-based and becomes 26 when the run is won (renderer clamps) | §1.4, §6 |
-| `Game.speedMultiplier` | 1.0 / 2.0 / 4.0; `game_cycle_speed()` cycles; `paused` is separate | §1.7 |
-| `Game.path` (`Path`) | live BFS route: `pts` are cell centres, `count` cells, `length = count-1` cells. Initially 26 cells / 25 segments (straight row 12). Grows when the player mazes. | §2 |
-| `Game.pathBlocked` | `false` in normal play. Set `true` only if a rebuild finds no route (defensive: board changed behind the core's back). Placement rejection does not set it — rejected builds never mutate the board. | §2.4 |
-| `Game.occupancy[row][col]` | `0` empty, else tower index + 1. Note **row-major** indexing in C, unlike Lua's `[col][row]`. | §2 |
-| `Enemy.pathPos` | distance along the *current* path in cells; `x,y` derived from it. Re-projection (§2.6) updates it when the road changes. | §2.6, §5.3 |
-| `Game.spawnQuota[3]` | appended core field: remaining regular-enemy element quota for the wave being spawned (fire/water/forest). Front end never writes it. | §6.4 |
-| `Game.stepAccumulator` | appended core field: leftover real time not yet converted to fixed steps. | §1.6 |
-| `TowerSpec` | `name`, `cost`, `damage`, `fireRate`, **`range` in cells (2.142857f)**, `color[3]`, `glow[3]` | §3, §8 |
-| `game_tower_stats()` | damage/fireRate at level, range constant | §8 |
-| `game_upgrade_cost()`, `game_sell_value()` | cost curve / 75 % refund | §7, §8 |
-| `game_damage_multiplier()` | element matrix 2.0 / 1.0 / 0.5 | §4 |
-| `game_wave_preview()` | exact upcoming-wave Fire/Water/Forest/Elite counts (sum = wave size) | §6.7 |
-| `game_can_place_at()` | **pure legality** incl. a hypothetical BFS; does NOT check gold. Used by the renderer for tile colouring. | §2.5 |
-| `game_place_tower()` | full placement (gold + path rules); may reject; emits `GAME_EVT_BUILD` | §2.5, §3.5 |
-| `game_select_tower()`, `game_set_cursor()`, `game_set_selected_type()` | selection/cursor/palette | §10 |
-| `game_upgrade_selected()`, `game_sell_selected()` | economy actions; sell rebuilds the road and re-projects enemies | §7.2, §8 |
-| `game_start_next_wave()` | only in `PHASE_BUILD` and not paused | §1.4 |
-| `game_toggle_pause()`, `game_cycle_speed()` | pause/speed; pause resets the step accumulator | §1.7 |
-| `game_clear_events()`, `game_clear_message()` | platform consumes events/messages | §12, §9.7 |
-| `Game.events` bits | `GAME_EVT_BUILD/SELL/UPGRADE/LASER/ENEMY_DIE/WAVE_START/GAMEOVER/VICTORY/LEAK` | §12 |
-| `MAX_TOWERS 96`, `MAX_ENEMIES 128`, `MAX_BEAMS 128`, `MAX_ELITE_SPAWNS 16` | fixed pools; no dynamic allocation anywhere in the core | §15.8 |
-
-Private core interface (`source/core/core_internal.h`, not usable by the front end): `CORE_START_COL/ROW = 0/12`, `CORE_GOAL_COL/ROW = 25/12`, `CORE_TOTAL_WAVES 25`, `CORE_MESSAGE_TIME 1.5f`, `core_build_path()`, `core_path_exists()`, `core_path_length_with_block()` (maze AI/sim helper), `core_path_contains()`, `core_path_position()`, `core_enemy_speed_cells()`, `core_enemy_speed_scale()`, wave content formulas.
+Private core interface (`source/core/core_internal.h`): maze constants/queries (`CORE_START_*`, `CORE_GOAL_*`, `core_build_path`, `core_path_exists`, `core_path_length_with_block`, `core_path_contains`, `core_path_position`), status-effect consts (`core_burn_max_stacks = 5`, `core_burn_duration = 2.5`, `core_burn_dps_per_stack = 1.0`, `core_stun_duration = 0.30`, `core_puddle_radius = 0.7`, `core_puddle_life = 5.0`, `core_puddle_dps = 2.0`, `core_slag_duration = 4.0`, `core_slag_damage_amp = 1.5`, `core_slag_speed_mult = 0.65`, `core_explosion_life = 0.30`), wave formulas, `core_enemy_layer_count`, `core_spawn_slot_is_elite`, `core_enemy_layer_types`, `core_enemy_speed_cells`.
 
 ### 0.4 The game in one paragraph
 
-A 26x13 maze tower defense. Creeps enter at `(0,12)` bottom-left and walk the current shortest road to the exit at `(25,12)` bottom-right. Towers are placed anywhere except those two cells — **including on the road**, which forces the BFS to find a detour and lengthens the walk (that is the core strategy). A placement that would seal the exit is refused. Between waves the player builds/upgrades, then taps NEXT WAVE; building is also allowed mid-wave. Three elemental towers (Fire/Water/Forest — identical base stats, rock-paper-scissors multipliers), 10 levels each, hitscan attacks with a 0.15 s laser visual. Kills pay 10 gold; start 150 gold; 20 lives; 25 waves; clearing wave 25 wins.
+A 26x13 maze tower defense with 25 waves and 20 lives. Creeps enter at `(0,12)` and walk the current BFS-shortest road to the exit at `(25,12)`; towers may be built **on** the road, forcing a detour (mazing is the core strategy). Every enemy is a stack of one to three concentric **HP / SHIELD / ARMOR** layers (waves 1–3: one layer, 4–8: two, 9+: three; elites get one extra). Six damage-type towers — **GUN** (normal), **FIRE** (burn), **SHOCK** (stun), **CORROSIVE** (acid puddle), **SLAG** (amplifier/slow), **BLASTER** (explosive AoE) — each is strong vs one layer type (2x), weak vs one (0.5x), neutral otherwise; slag makes everything take +50 % damage. Kills pay 10 gold; start 150 gold; towers upgrade 10 levels (damage doubles per level). Clear wave 25 to win.
 
 ---
 
 ## 1. Game loop & state machine
 
-### 1.1 Original Lua update order (reference — the C `game_step` mirrors it)
+### 1.1 Step order `[CODE]` (`game_step`)
 
-The path BFS itself is **not** in the update loop in the Lua either: it runs inside the build/sell input handlers. The per-frame order is:
-
-```
- 1. if phase == MENU: update menu particles only; return
- 2. dt = dt * gameSpeed
- 3. laserSoundCooldown = max(0, laserSoundCooldown - dt)
- 4. errorTimer = max(0, errorTimer - dt)
- 5. gameTime += dt
- 6. laser/beam lifetime -= dt; remove dead
- 7. wave/elite bookkeeping, spawn timer -> spawn one enemy
- 8. enemies: t += dt*speed/100; t >= 1 -> leak
- 9. towers (column-major over grid): cooldown -= dt; nearest target in range; fire
-10. wave-completion check -> retry/advance (Lua); port: BUILD/VICTORY
-```
-
-Build/sell handlers in the Lua: mutate `gridData`, run `findPath()`; on success `updatePath()` (second BFS), on failure roll back and toast `"Path blocked!"`; sell runs `updatePath()`. `[LUA] 1350-1376, 1444-1457`
-
-### 1.2 Original states (audit)
-
-| Layer | Lua values | Notes |
-|---|---|---|
-| Outer `gameState` | `"MENU"`, `"PLAYING"` | no pause, no game over, no victory, no restart |
-| Inner `state` | `"MOVING"`, `"BUILDING"`, `"TOWER_SELECTED"` | cursor/build mode (`main.lua:188`) |
-| Speed | `speedLevels {0, 0.5, 1, 2, 4}` | `0` is the pause hack |
-| Overlay | `showControls` | SELECT/TAB toggles a controls panel |
-
-### 1.3 Missing states in the Lua (defects fixed by the port)
-
-No lives, no game over, no victory/final wave, no pause menu, no restart/return-to-menu, no mute, no boss type, and `gameover.wav` is loaded but never played (`main.lua:263`). Leaking both paid gold and restarted the wave forever (`main.lua:698-707`, `779-798`), so the run could neither be won nor lost.
-
-### 1.4 3DS phase machine `[CODE]`
-
-| Phase | Entered by | Simulation | Player actions | UI |
-|---|---|---|---|---|
-| `PHASE_MENU` | `game_init` | none (renderer menu particles) | tap bottom START / A / Start -> `game_new_run` | title on both screens |
-| `PHASE_BUILD` | `game_new_run`; completion of a wave < 25 | no enemies/spawning; tower timers/animations still advance; message timers tick | build/upgrade/sell/type/cursor/NEXT WAVE/pause | top HUD `BUILD`; bottom `NEXT WAVE` + incoming preview |
-| `PHASE_WAVE` | `game_start_next_wave` (BUILD and not paused) | full step (§1.5) | same actions as BUILD (building mid-wave is allowed) | top HUD `WAVE`; bottom wave progress + stats |
-| `PHASE_GAMEOVER` | `lives` hits 0 on a leak | frozen | bottom PLAY AGAIN / MAIN MENU; A retry, B menu | result overlay |
-| `PHASE_VICTORY` | wave counter passes 25 | frozen | as game over | result overlay |
-
-Transitions `[CODE]`:
-
-| From | Trigger | To | Side effects |
-|---|---|---|---|
-| MENU | START/A/Start | BUILD | `game_new_run`: gold 150, lives 20, wave 1, totalWaves 25, clear board/entities, speed 1, build BFS path, selected type 0, selectedTower -1, cursor `(0,0)` |
-| BUILD | NEXT WAVE (not paused) | WAVE | `start_wave()`: quotas/elite schedule for `wave`, spawn timer 0, selected tower cleared, `GAME_EVT_WAVE_START` |
-| WAVE | `enemiesToSpawn == 0 && enemiesAlive == 0` | BUILD or VICTORY | `++wave`; if `wave > totalWaves` -> VICTORY + `GAME_EVT_VICTORY`, else BUILD |
-| WAVE | leak takes lives to 0 | GAMEOVER | lives clamped 0, `GAME_EVT_LEAK` + `GAME_EVT_GAMEOVER`; enemies frozen |
-| GAMEOVER / VICTORY | PLAY AGAIN / RETRY (touch or A) | BUILD | fresh `game_new_run` with the same seed |
-| GAMEOVER / VICTORY | MAIN MENU (touch or B) | MENU | `game_init` |
-| BUILD / WAVE | Start / pause badge | same, `paused` toggled | freeze battlefield; step accumulator reset on the toggle; messages keep ticking |
-| BUILD / WAVE | Select / speed badge | same | speed 1 -> 2 -> 4 -> 1 |
-
-Wave-number semantics `[CODE]`: `wave` is the wave being played (or the next one in BUILD). `check_wave_complete()` does `++wave` and tests `wave > totalWaves`; so after clearing wave 25, `wave == 26` and phase is `PHASE_VICTORY`. The renderer clamps display to `min(wave, totalWaves)` (`shownWave`) — see §11.2. `totalWaves` is 25.
-
-### 1.5 `game_step(dt)` order `[CODE]`
-
-`game_update(g, realDt)` converts real time into fixed steps; `game_step` is one deterministic step (tests call it directly).
+`game_update(g, realDt)` clamps real time to 0.25 s, accumulates and runs at most 6 fixed `1/60 s` steps; leftover is dropped (no catch-up spiral). `game_step(dt)` is one deterministic step and multiplies `dt` by `speedMultiplier` (1/2/4).
 
 ```
 game_step(dt):
-  clamp dt to [0, CORE_MAX_STEP_DT=0.25]
-  tick_message(dt)                      # wall-clock, before pause/phase checks
+  clamp dt to [0, 0.25]
+  tick_message(dt)                      # wall-clock; expires while paused/at 4x
   if paused: return
   if phase not in {BUILD, WAVE}: return
-  sdt = dt * speedFraction              # 1, 2 or 4; anything else -> 1
-  timeTotal += sdt; update_beams(sdt)   # beam.life -= sdt
+  sdt = dt * speedMultiplier
+  timeTotal += sdt; update_beams(sdt)
   if phase == BUILD:
-      update_tower_timers(sdt)          # cooldown/animPhase keep running during build
+      update_tower_timers(sdt)          # cooldowns/animations tick; puddles freeze
       return
   # PHASE_WAVE
   waveTime += sdt
-  update_spawning(sdt)                  # spawn timer, quota draw, elite slots
-  if (!update_enemies(sdt)) return      # leak -> lives; returns false on game over
-  compact_enemies()
-  update_towers(sdt)                    # cooldown, nearest target, damage, beams, kills
-  compact_enemies()
-  check_wave_complete()                 # ++wave or VICTORY
+  1. update_spawning(sdt)               # queue -> enemies (layer composition hash)
+  2. update_status_effects(sdt)         # burn ticks, slag timer, puddle lifetime+ticks
+  3. update_enemies(sdt)                # stun freezes, slag slows, leaks cost a life
+  4. compact_enemies(); update_towers(sdt)   # target, fire, AoE, on-hit statuses
+  5. compact_enemies(); check_wave_complete()
 ```
 
-- There is **no path rebuild in the step loop**. The road changes only inside `game_place_tower()` / `game_sell_selected()` (§2.4).
-- Message timers use real dt (they expire while paused and at 4x speed).
-- Enemy cleanup preserves spawn order via compaction (`memmove`-style copy), so the nearest-target tie-break stays "earliest spawned".
-- `game_update` accumulates real dt (`clamp(dt, 0, 0.25)`) and runs at most 6 fixed steps (`CORE_MAX_STEPS_PER_UPDATE`), then drops leftover time to avoid catch-up spirals.
+Notes:
+- Status damage (burn, acid) can kill, and kill rewards/events fire the same as direct hits.
+- Puddles only simulate in WAVE; they are frozen during BUILD/game over/victory.
+- No path rebuild happens in the step loop; only build/sell can change the road (§2).
+- Enemy compaction preserves spawn order, which is the targeting tie-break order ("oldest first").
 
-### 1.6 Fixed timestep `[CODE]`
+### 1.2 Original LÖVE behaviour (reference)
 
-`CORE_FIXED_STEP = 1/60 s`; speed multiplies inside the step (at 4x one step simulates 4/60 s). `game_update` vs `game_step` is the test seam. Pause (`game_toggle_pause`) resets `stepAccumulator` so unpausing cannot burst; while paused only `tick_message` runs.
+The LÖVE update order was `dt*gameSpeed -> spawn -> move -> towers fire -> completion`; wave auto-chained, no lives, leaks paid gold (`main.lua:617-799`). The port keeps the order and replaces the end-state logic (L5/L6).
 
-### 1.7 Pause & speed `[CODE]` (deviation D5/D6 in §14.2)
+### 1.3 Phase machine `[CODE]`
 
-- `paused` toggled by Start or the header pause badge; handled **before** any other input in a frame, so pausing never also triggers an action.
-- Speeds 1.0 / 2.0 / 4.0 via Select, the header speed badge, or `game_cycle_speed()`; shown as `1X`/`2X`/`4X`, yellow when >1x.
-- The Lua's 0.5x and its `0x` pause speed are not ported: 0x is replaced by the pause overlay.
-- Pausing is allowed in BUILD and WAVE only (not in MENU/GAMEOVER/VICTORY).
+| Phase | Entered by | Simulation | Player actions |
+|---|---|---|---|
+| `PHASE_MENU` | `game_init` | none (renderer menu particles) | A/Start/tap START -> `game_new_run` |
+| `PHASE_BUILD` | `game_new_run`; wave < 25 resolved | no enemies; tower timers/animations tick; puddles frozen | build/upgrade/sell/type/cursor/NEXT WAVE/pause |
+| `PHASE_WAVE` | NEXT WAVE (BUILD, not paused) | full step | same actions (mid-wave building allowed) |
+| `PHASE_GAMEOVER` | lives hit 0 on a leak | frozen | A/tap PLAY AGAIN -> new run; B/tap MAIN MENU -> menu |
+| `PHASE_VICTORY` | wave counter passes 25 | frozen | same result screen |
+
+- `game_start_next_wave()` is ignored outside BUILD or while paused.
+- `check_wave_complete()`: when `enemiesToSpawn == 0 && enemiesAlive == 0`, `++wave`; if `wave > totalWaves` -> VICTORY + `GAME_EVT_VICTORY`, else BUILD. After clearing wave 25 `wave == 26`; renderers clamp display to `min(wave, 25)`.
+- `game_new_run(g, seed)`: fresh run in BUILD, wave 1, gold 150, lives 20, totalWaves 25, speed 1, BFS road built, `selectedType = DMG_NORMAL`, `selectedTower = -1`, cursor `(0,0)`, `rng = seed` (0 -> fixed non-zero).
+- Pause: `game_toggle_pause()` freezes the battlefield, resets `stepAccumulator` (no unpause burst); message timers keep ticking. Pause is allowed in BUILD/WAVE only.
+- Speed: `game_cycle_speed()` 1 -> 2 -> 4 -> 1; shown `1X`/`2X`/`4X`, yellow when >1x.
 
 ---
 
-## 2. Grid & dynamic pathfinding (restored maze mechanic)
+## 2. Grid & dynamic pathfinding (maze mechanic — unchanged)
 
 ### 2.1 Grid constants
 
-| Constant | Value | Notes |
-|---|---|---|
-| `GRID_COLS`, `GRID_ROWS` | 26, 13 | `[LUA]` 26x13 grid |
-| Start / entrance | **`(0,12)`** = Lua `(1,13)` | spawn centre `(0.5,12.5)`; never buildable |
-| Goal / exit | **`(25,12)`** = Lua `(26,13)` | leak point; never buildable |
-| Initial path (empty board) | **26 cells / 25 segments**, straight along row 12, left to right | `[CODE]` `core_build_path`; matches Lua's initial path shape (translated 0-based) |
-| Path storage | `Game.path`: `pts[]` cell centres, `count`, `length = count-1` cells; max `MAX_PATH_CELLS = 338` (full-board snake) | `[CODE]` |
-| Cell space | 1.0 = one cell | `include/game.h` |
-| Top-screen cell size | **15 px**; board origin **`(5,38)`** = 390x195 px, 38 px HUD strip above, 7 px margin below | `[CODE]` `source/render.h` |
-| Original px cell | 28 px (1280x720) | used only to derive range: 60/28 = **2.142857 cells** |
-| Buildable cells | the whole board except `(0,12)` and `(25,12)`; road cells included | §2.5 |
+| Constant | Value |
+|---|---|
+| `GRID_COLS`, `GRID_ROWS` | 26, 13; cell centres `(col+0.5,row+0.5)` |
+| Entrance / spawn | `(0,12)` = LÖVE `(1,13)`; spawn centre `(0.5,12.5)` |
+| Exit / leak point | `(25,12)` = LÖVE `(26,13)`; exit centre `(25.5,12.5)` |
+| Initial path (empty board) | **26 cells / 25 segments**, straight row 12, left to right |
+| Path storage | `Game.path.pts[]` cell centres, `count`, `length = count-1` cells; max `MAX_PATH_CELLS = 338` |
+| Top screen cell size | 15 px; board origin `(5, 38)` -> 390x195 px; 38 px HUD strip above, 7 px margin below |
+| Range | 2.142857 cells; drawn radius 32 px |
 
-C indexing warning: `Game.occupancy` is `[row][col]` (row-major), while the Lua used `gridData[col][row]`. Tower scans in the code are row-major loops; the Lua's update loop was column-major. This only affects the order in which simultaneous shots resolve, not balance.
+### 2.2 BFS `[CODE]` (`source/core/grid.c`)
 
-### 2.2 Cell <-> pixel mapping `[CODE]`
+4-connected BFS entrance -> exit, exactly the LÖVE rules: FIFO queue, neighbour order **up, down, left, right**, uniform cost 1, occupied cells are walls, visited at enqueue, parent walk from goal back to start. Path cells are written as cell centres, so every segment is exactly 1 cell long.
 
-```
-core:     centre = (col + 0.5, row + 0.5)                       [cells]
-renderer: x = BOARD_X (5) + cellX * 15,  y = BOARD_Y (38) + cellY * 15,  cell = 15 px
-range draw radius = 2.142857 * 15 = 32.14 -> 32 px
-```
+- Empty board: `(0,12),(1,12),...,(25,12)` — 26 cells / length 25.
+- A single tower on the road at `(7,12)` -> length **27** (detour via row 11/13).
+- Deterministic: same board -> same path; `MAX_PATH_CELLS 338` covers a full-board snake.
+- `game_can_place_at()` runs the same BFS on a **hypothetical** board (candidate cell treated as a wall) without mutating the game, so the UI can colour the cursor tile every frame.
 
-The road is drawn from the **live** `g->path` polyline (`render.c build_path_map()`): every path cell is filled, and 1 px shoulder lines are drawn on road edges that border buildable cells so the brown road reads against the dark board. There is no hard-coded road anywhere in the renderer.
+### 2.3 Rebuild triggers `[CODE]`
 
-### 2.3 BFS implementation `[CODE]` (`source/core/grid.c`)
+| Trigger | Where |
+|---|---|
+| Run start | `game_new_run()` -> `core_build_path()` |
+| Successful placement | `game_place_tower()`: commit tower/gold/occupancy, then rebuild + re-project |
+| Defensive rollback | if the post-commit rebuild somehow fails: undo tower/gold/occupancy, rebuild, re-project, message `"that would block the path"` |
+| Sale | `game_sell_selected()`: compact towers, rebuild occupancy, rebuild road, re-project |
+| Never | the step loop — no BFS during gameplay ticks |
+| Cursor UI | `game_can_place_at()` per frame (hypothetical only) |
 
-4-connected BFS, entrance -> exit, exactly the Lua's rules (`main.lua:63-123`) with fixed arrays and no allocation:
+`Game.pathBlocked` stays `false` in normal play; it is only set if a rebuild finds no route (corrupted board), and nothing in the game loop reads it.
 
-```
-bfs_route(g, blockCol, blockRow, outPath):
-  visited[13][26] = false; parent[338] = -1; queue[338]; head = tail = 0
-  start = index(0,12); goal = index(25,12)          # index = row*26 + col
-  visited[0][12] = true; queue[tail++] = start
-  while head < tail:
-      current = queue[head++]
-      if current == goal: found = true; break
-      col = current % 26; row = current / 26
-      for neighbour in EXACT ORDER: up (row-1), down (row+1), left (col-1), right (col+1):
-          if out of bounds: continue
-          if visited: continue
-          if wall: continue                          # occupancy != 0, OR the hypothetical block cell
-          visited = true; parent[n] = current; queue[tail++] = n
-  if not found: return 0
-  walk parent[] from goal back to start, count cells; write cell centres start..goal into *outPath
-  outPath->length = count - 1
-```
+### 2.4 Placement rules `[CODE]`
 
-- Neighbour expansion order is **up, down, left, right** — identical to the Lua (`main.lua:84-89`), so tie-breaking and the chosen detour are deterministic and match the original's expansion order.
-- Walls are cells with `occupancy != 0`, plus the optional hypothetical block (used by placement checks and the maze AI, without mutating the board).
-- Path cells are written as **cell centres** `(col+0.5,row+0.5)`, so path segments are exactly 1 cell long; `pathPos` = segment index + interpolation factor.
-- Empty board result: `(0,12),(1,12),...,(25,12)` — 26 cells, length 25 (`[CODE]` test `test_initial_path`).
-- A single tower on the road at `(7,12)` yields length **27** (detour via row 11 or 13; the test accepts either, `test_build_on_road_reroutes`). A contiguous road wall of N cells adds exactly +2 to the path (up, across, down) regardless of N; long paths need mazes with multiple rows/turns.
-- Worst case path = 338 cells (a Hamiltonian snake); `MAX_PATH_CELLS` covers it.
+Check order (first failure wins; failure sets the 1.5 s `Game.message` and changes nothing):
 
-### 2.4 When the path is rebuilt `[CODE]`
+1. phase BUILD/WAVE -> `"can't build now"`
+2. in bounds -> `"can't build there"`
+3. not entrance `(0,12)` -> `"can't build on the entrance"`
+4. not exit `(25,12)` -> `"can't build on the exit"`
+5. cell empty -> `"cell occupied"`
+6. `towerCount < MAX_TOWERS (96)` -> `"tower limit"`
+7. exit still reachable with the candidate as a wall -> `"that would block the path"`
+8. `gold >= cost` -> `"not enough gold"`
 
-| Trigger | Function | Notes |
-|---|---|---|
-| Run start | `game_new_run()` | builds the initial straight row-12 path; sets `pathBlocked` if it fails (cannot on an empty board) |
-| Successful placement | `game_place_tower()` | after committing the tower + occupancy + gold: `core_build_path()`, then `reproject_enemies()` |
-| Defensive placement rollback | `game_place_tower()` | if the post-commit BFS somehow finds no route: undo tower/occupancy/gold, rebuild the old path, re-project, message `"that would block the path"` (unreachable in practice because of the pre-check) |
-| Sale | `game_sell_selected()` | removing a wall can only shorten the road; rebuild + re-project |
-| Never | `game_step()` | the update loop never runs BFS |
-| UI query | `game_can_place_at()` | runs a **hypothetical** BFS (no mutation) to decide if a placement would keep the exit reachable. The top-screen renderer calls it every frame for the cursor tile; it is a 338-cell BFS and is deliberately allowed to run per frame. |
+Success: gold deducted, tower created at level 1 (`invested = cost`, `cooldown = 0`), occupancy set, tower auto-selected, road rebuilt, enemies re-projected, `GAME_EVT_BUILD`.
 
-`Game.pathBlocked` stays `false` in normal play; it is only set if a rebuild finds no route (e.g. a corrupted board). It is not used by the game loop.
+`game_can_place_at()` is the pure version (checks 1–7 but **not** gold) used for the cursor tile: green = legal + affordable, yellow = legal but unaffordable, white = tower, dim = blocked.
 
-**Renderer rule:** read `g->path.pts` / `g->path.count` fresh every frame — the road can change on any build/sell, including mid-wave. Never cache the polyline.
+### 2.5 Enemy re-projection `[CODE]` (`source/core/game.c`)
 
-### 2.5 Placement rules and "blocked path" behaviour `[CODE]`
+After every rebuild, each live enemy is moved to the nearest point on the new polyline: per-segment clamped projection, `pathPos = segmentIndex + t`, then `x,y = path_position(pathPos)`. Tie-break: first segment (strict `<`). Enemies keep walking from where they stand; never snapped back to the entrance. A shorter road (sell) re-projects them forward along the shortcut.
 
-`game_place_tower(col,row)` (uses `g->selectedType`) checks in this order, first failure wins; a failure sets `g->message` (1.5 s) and returns false without mutating anything:
+### 2.6 Renderer rule
 
-| # | Check | Message |
-|---|---|---|
-| 1 | phase is BUILD or WAVE | `"can't build now"` |
-| 2 | cell in bounds | `"can't build there"` |
-| 3 | cell is not the entrance `(0,12)` | `"can't build on the entrance"` |
-| 4 | cell is not the exit `(25,12)` | `"can't build on the exit"` |
-| 5 | cell empty (`occupancy == 0`) | `"cell occupied"` |
-| 6 | `towerCount < MAX_TOWERS` (96) | `"tower limit"` |
-| 7 | exit still reachable with this cell treated as a wall (`core_path_exists`) | `"that would block the path"` |
-| 8 | `gold >= 20` | `"not enough gold"` |
+The road can change on any build/sell, including mid-wave: **read `g->path.pts` / `g->path.count` every frame; never cache the polyline.** Entrance/exit arrows are drawn from `path.pts[0]` / `path.pts[count-1]` and move when the road reroutes.
 
-On success: `gold -= 20`; tower created at level 1 with `invested = 20`, `cooldown = 0`; `occupancy[row][col]` set; `towerCount++`; the new tower is **auto-selected**; road rebuilt; enemies re-projected; `GAME_EVT_BUILD`.
+### 2.7 Performance
 
-`game_can_place_at(col,row,type)` is the pure-predicate version used by the UI: phase + bounds + entrance/exit + occupancy + tower cap + hypothetical reachability. It deliberately **does not check gold**, so the renderer can show green (legal + affordable), yellow (legal but unaffordable), white (tower) or dim (illegal: entrance/exit or would seal the exit).
-
-Original Lua differences (all deliberate fixes, §14.1 B5):
-- Lua built the tower first, then BFS-validated and **rolled back** on failure (`"Path blocked!"`, no gold spent). It ran two BFS on success. The port pre-checks with a hypothetical BFS (one BFS) and never mutates on failure.
-- Lua's BFS seeded the start cell unconditionally, so the spawn cell **could** be built on (enemy spawned inside the tower). It could not be built on the exit. The port protects both and uses distinct messages.
-- Message text is `"that would block the path"` (lowercase, 1.5 s) instead of `"Path blocked!"`.
-
-### 2.6 Enemy re-projection after a reroute `[CODE]` (`source/core/game.c`)
-
-```
-project_onto_path(path, x, y) -> float:
-    bestDistSq = +inf; bestT = 0
-    for i in 0 .. path.count-2:
-        a = path.pts[i]; b = path.pts[i+1]; d = b - a
-        t = clamp(dot(p - a, d) / |d|^2, 0, 1)
-        q = a + d*t
-        if |p - q|^2 < bestDistSq: bestDistSq = |p - q|^2; bestT = i + t
-    return clamp(bestT, 0, path.length)
-
-reproject_enemies(g):
-    for every active enemy:
-        e->pathPos = project_onto_path(&g->path, e->x, e->y)
-        (e->x, e->y) = path_position(&g->path, e->pathPos)
-```
-
-- Segments are exactly one cell long, so `i + t` is directly a distance in cells.
-- Tie-break: the **first** segment wins (`<` strict), so the result is deterministic.
-- Called after every successful build and every sale. Enemies keep walking from the nearest point on the new road instead of snapping back to the entrance; a longer road therefore starts affecting the already-walking enemies immediately (they may move backwards/forwards in path distance, but stay spatially near where they were).
-- If the new path is shorter, enemies re-projected past their old progress will have advanced — this is accepted (the player removed a wall, i.e. gave the creeps a shortcut; they now walk the shortcut).
-
-### 2.7 Original BFS quirks (documented, not reproduced)
-
-The Lua BFS used a table queue with `table.remove(queue,1)` (O(n) shift) and allocated four neighbour tables per expanded node; it seeded `visited[startCol][startRow]` and never checked the start cell for a tower; it reconstructed with `table.insert(path,1,...)`; it ran on every build/sell. It returned `nil` when the goal was unreachable, which triggered the rollback branch. The port keeps the algorithm's semantics (4-connected, up/down/left/right order, unit steps) but uses fixed arrays and a head/tail FIFO ring. None of the Lua's failure paths remain reachable.
-
-### 2.8 Performance note `[CODE]`
-
-BFS allocates nothing: `visited[13][26]` (338 B), `parent[338]` and `queue[338]` as `int16_t` (~1.7 KB total) live on the stack for the call. Work is <= 338 cells x 4 neighbours. It runs once per successful build, once per sale, and once per UI cursor query (`game_can_place_at` in the top renderer, per frame). That is negligible next to drawing ~1300 primitives and is far cheaper than the Lua+LovePotion original's table-based BFS plus double validation (§13.4).
+BFS uses stack arrays only: `visited[13][26]` + `parent[338]` + `queue[338]` (~1.7 KB), <=338 cells x 4 neighbours. It runs once per build/sale plus the per-frame cursor query — negligible against rendering, and far cheaper than the Lua original's table BFS + double validation.
 
 ---
 
-## 3. Towers
+## 3. Towers (six damage types)
 
-### 3.1 Roster `[LUA]` (`main.lua:128-156`)
+### 3.1 Roster `[SPEC]` + `[CODE]` (`source/core/data.c`)
 
-All three towers are stat-identical; only element (colour + damage multiplier) differs. `glowColor`/`glow` is declared but unused by the Lua — kept in `TowerSpec` for parity, no glow behaviour.
+All towers share range **2.142857 cells**. Damage doubles per upgrade level; the cooldown follows the shared per-level table, except BLASTER which is **3x** that table. `TowerSpec.name` is the internal name; the bottom-screen UI displays the damage-type name (see §9.5: UI shows `EXPLOSIVE`, not `BLASTER`).
 
-| # | Element | Core id | Cost | Damage L1 | `fireRate` L1 (= cooldown **seconds between shots**) | Shots/s `[DERIVED]` | Range | Range (cells) `[DERIVED]` | Colour (floats) | 8-bit | glow (unused) |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | Fire | `ELEMENT_FIRE` (0) | 20 | 3 | 0.8 | 1.250 | 60 px | **2.142857** | (0.95, 0.15, 0.15) | (242, 38, 38) | (0.95, 0.3, 0.1) |
-| 2 | Water | `ELEMENT_WATER` (1) | 20 | 3 | 0.8 | 1.250 | 60 px | 2.142857 | (0.15, 0.4, 0.95) | (38, 102, 242) | (0.1, 0.5, 0.95) |
-| 3 | Forest | `ELEMENT_FOREST` (2) | 20 | 3 | 0.8 | 1.250 | 60 px | 2.142857 | (0.15, 0.9, 0.15) | (38, 230, 38) | (0.1, 0.9, 0.3) |
+| # | Spec name | Damage type | Cost | DMG L1 | Cooldown L1 | Effect | AoE | Colour `(r,g,b)` | Glow |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | GUN | normal | 20 | 3 | 0.80 s | none | — | (0.75,0.75,0.78) | (0.45,0.45,0.50) |
+| 1 | FIRE | fire | 20 | 3 | 0.80 s | +1 burn stack (max 5, 2.5 s, 1 dps/stack) | — | (0.95,0.45,0.12) | (0.95,0.30,0.05) |
+| 2 | SHOCK | electric | 20 | 3 | 0.80 s | stun 0.30 s | — | (0.25,0.80,1.00) | (0.10,0.60,1.00) |
+| 3 | CORROSIVE | corrosive | 20 | 3 | 0.80 s | acid puddle (r 0.7, 5 s, 2 dps) | — | (0.45,0.85,0.15) | (0.30,0.80,0.10) |
+| 4 | SLAG | slag | 15 | 1 | 0.80 s | slag 4 s: +50 % damage taken, ×0.65 speed | — | (0.70,0.25,0.90) | (0.60,0.15,0.85) |
+| 5 | BLASTER | explosive | 30 | 9 | **2.40 s** (3x) | AoE blast radius **1.3 cells** | 1.3 | (1.00,0.70,0.15) | (1.00,0.50,0.05) |
 
-`TowerSpec` (`source/core/data.c`): `name = "Fire"/"Water"/"Forest"`, `cost = 20`, `damage = 3.0f`, `fireRate = 0.8f`, `range = 2.142857f` cells, colours/glows as above.
+Single-target DPS at L1 (neutral): GUN/FIRE/SHOCK/CORROSIVE/BLASTER = **3.75**, SLAG = **1.25**. At L10 (neutral): 5,485.7 for the 3-damage towers and BLASTER, SLAG 1,828.6 (`[DERIVED]`).
 
-`fireRate` semantics `[LUA] 739-740`: seconds of cooldown between shots. On fire `cooldown = fireRate(level)`; every step `cooldown = max(0, cooldown - dt)`. A new tower has `cooldown = 0` and can fire on its first step with a target in range. Range is constant at all levels (from the spec, not the tower).
+### 3.2 Firing `[CODE]`
 
-### 3.2 Targeting & firing `[LUA]` (`main.lua:715-777`)
+- A tower fires when `cooldown <= 0` and a target is in range; on firing `cooldown = fireRate(level)`.
+- Damage is hitscan (instant); each shot spawns a `Beam`:
+  - `kind 0` (GUN/FIRE/SHOCK/CORROSIVE/SLAG): line from tower centre to the target position, `damageType` set for colour, life 0.15 s (`CORE_BEAM_LIFE`).
+  - `kind 1` (BLASTER): explosion ring centred on the impact point, `radius = aoeRadius` (1.3), life 0.30 s (`core_explosion_life`).
+- `MAX_BEAMS 128`; if full, a shot still deals damage and the cosmetic beam is dropped.
+- BLASTER damages **every** enemy within 1.3 cells of the target's position (including the target) for its full damage; there is no falloff. Each victim applies its own layer multipliers + slag amp.
+- On-hit status effects are applied **only to the surviving target of a direct hit**. Burn/acid ticks never re-apply statuses; explosions apply none (their damage type has no on-hit effect).
+- `GAME_EVT_LASER` is set for every shot (the audio layer will rate-limit; §12).
 
-- Every tower is scanned each step; each tower scans all active enemies.
-- Candidate: `distance(towerCentre, enemyCentre) <= 2.142857` cells (Euclidean, inclusive).
-- Target: smallest distance; ties keep the **earliest in the enemy array** (= earliest spawned) because only a strictly smaller distance replaces.
-- Damage is applied instantly (hitscan; no projectile, no travel time). The beam is pure VFX.
-- Kill: `gold += 10`, `kills++`, enemy removed, `GAME_EVT_ENEMY_DIE`. A killing shot still spawns its beam.
-- No line-of-sight blocking, no minimum range, no priority modes, no crits. Towers never take damage.
+### 3.3 Targeting `[CODE]` (`find_target`)
 
-### 3.3 Beams `[LUA]` (`main.lua:747-755`, `991-999`)
+Default is the **nearest** enemy in range. Elemental towers prefer a target whose **outermost layer** matches their strength; if none in range has that outer layer, they fall back to nearest. Ties (strict `<`) go to the **oldest** enemy (lowest array index = earliest spawned).
 
-| `Beam` field | Value |
+| Tower | Prefers outer layer |
 |---|---|
-| `x1,y1` | tower cell centre at fire time |
-| `x2,y2` | target position at fire time (snapshot, does not follow) |
-| `element` | firing tower's element (colour source) |
-| `life`, `maxLife` | 0.15, 0.15 (`CORE_BEAM_LIFE`) |
-| draw | alpha = `life/0.15`; 1 px line at alpha; 3 px line at `alpha*0.1` |
+| FIRE | HP (red) |
+| SHOCK | SHIELD (blue) |
+| CORROSIVE | ARMOR (yellow) |
+| GUN / SLAG / BLASTER | nearest (no preference) |
 
-`MAX_BEAMS 128`; when full a shot still deals damage and the cosmetic beam is dropped.
+Only the outermost layer counts for preference; an inner layer matching the element does not attract targeting.
 
-### 3.4 Tower icon geometry `[LUA]` (`main.lua:293-390`)
+### 3.4 Per-level scaling `[CODE]` (`game_tower_stats`)
 
-Filled polygons in a local system centred on the cell centre, radius parameter `size`. The C renderer draws them as **centroid triangle fans** (`render.c poly_fill`, each glyph is star-shaped) — visually identical at these sizes. Winding order irrelevant.
+```
+damage   = spec.damage * (1 << (level-1))          // doubles per level
+fireRate = cooldownTable[level-1] * (spec.fireRate / 0.80)   // BLASTER scale = 3, others 1
+range    = spec.range                              // 60/28 cells, never upgrades
+```
 
-**Size**: original `size = 12 + min(level,10)*0.4` px in 28 px cells. On the 15 px board: levels 1-4 -> **7 px**, 5-9 -> **8 px**, 10 -> **9 px**.
+Shared cooldown table (seconds): **0.80, 0.72, 0.64, 0.57, 0.51, 0.45, 0.40, 0.36, 0.32, 0.28**; BLASTER = ×3 (2.40 … 0.84).
 
-**Fire** (s = size, w = 0.8s): outer vertices `(0,-1) (-0.8,+0.6) (-0.24,+0.2) (0,+0.8) (+0.24,+0.2) (+0.8,+0.6)` * s (6 tris around centroid `(0,+0.2s)`); inner flame at white alpha 0.15: `(0,-0.6) (-0.32,+0.3) (-0.08,+0.1) (0,+0.4) (+0.08,+0.1) (+0.32,+0.3)` * s.
+| Level | Damage × | Damage (3-dmg towers) | Cooldown (normal) | DPS (normal) | Damage (SLAG) | Damage (BLASTER) | Cooldown (BLASTER) | Upgrade cost | Total invested | Sell (75 %) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 3 | 0.80 | 3.75 | 1 | 9 | 2.40 | 20 | 20 | 15 |
+| 2 | 2 | 6 | 0.72 | 8.33 | 2 | 18 | 2.16 | 40 | 40 | 30 |
+| 3 | 4 | 12 | 0.64 | 18.75 | 4 | 36 | 1.92 | 80 | 80 | 60 |
+| 4 | 8 | 24 | 0.57 | 42.11 | 8 | 72 | 1.71 | 160 | 160 | 120 |
+| 5 | 16 | 48 | 0.51 | 94.12 | 16 | 144 | 1.53 | 320 | 320 | 240 |
+| 6 | 32 | 96 | 0.45 | 213.33 | 32 | 288 | 1.35 | 640 | 640 | 480 |
+| 7 | 64 | 192 | 0.40 | 480.00 | 64 | 576 | 1.20 | 1280 | 1280 | 960 |
+| 8 | 128 | 384 | 0.36 | 1066.67 | 128 | 1152 | 1.08 | 2560 | 2560 | 1920 |
+| 9 | 256 | 768 | 0.32 | 2400.00 | 256 | 2304 | 0.96 | 5120 | 5120 | 3840 |
+| 10 | 512 | 1536 | 0.28 | 5485.71 | 512 | 4608 | 0.84 | — (MAX) | 10240 | 7680 |
 
-**Water** (s): `(0,-1) (-0.8,+0.2) (-0.5,+0.6) (0,+1) (+0.5,+0.6) (+0.8,+0.2)` * s, centroid `(0,+0.27s)`; highlight quad white alpha 0.2: `(-0.2,-0.4) (-0.4,-0.1) (-0.2,-0.1) (-0.1,-0.3)` * s.
+An upgrade does **not** reset the tower's current cooldown, and range never changes.
 
-**Forest/leaf** (s): `(0,-1) (-0.7,-0.3) (-0.8,+0.2) (-0.3,+0.6) (0,+0.4) (+0.3,+0.6) (+0.8,+0.2) (+0.7,-0.3)` * s, centroid `(0,+0.05s)`; vein 1 px line `(0,-0.5s)` -> `(0,+0.3s)` black alpha 0.15.
+### 3.5 Tower glyphs `[CODE]` (renderer, `art_tower_icon`)
 
-**Star** (elite / HUD), 10 vertices: `(0,-1) (0.3,-0.3) (1,-0.3) (0.4,0.1) (0.6,0.8) (0,0.4) (-0.6,0.8) (-0.4,0.1) (-1,-0.3) (-0.3,-0.3)` * s, centroid `(0,0)`.
+Six pixel-art glyphs, drawn in the damage-type colour at radius 7 (L1–4) / 8 (L5–9) / 9 (L10), with an element glow and a 1 px level bar at the bottom of the cell. GUN = grey bullet with a driving band; FIRE = flame polygon (same shape as the original game); SHOCK = Z-shaped lightning bolt; CORROSIVE = dripping acid blob; SLAG = purple crystal shard; BLASTER = dark bomb with a lit fuse. At level 10 the tower gets a small gold cap instead of the normal level indicator styling.
 
-**Level marker** (drawn by the top renderer): level < 10 -> level number above the icon; level 10 -> two small gold rects above it (see §11.2).
+### 3.6 Action API `[CODE]`
 
-### 3.5 Action API behaviour `[CODE]`
-
-| API | Behaviour |
+| API | Behaviour / errors |
 |---|---|
-| `game_place_tower(g,col,row)` | §2.5; uses `selectedType`; auto-selects the placed tower; emits BUILD |
-| `game_can_place_at(g,col,row,type)` | pure legality incl. hypothetical BFS; no messages; no gold check |
-| `game_select_tower(g,idx)` | `idx` in `[0,towerCount)` selects, anything else clears (`-1`) |
-| `game_set_selected_type(g,type)` | ignores out-of-range types; does not place |
-| `game_set_cursor(g,col,row)` | clamps to grid |
-| `game_upgrade_selected(g)` | §8; messages `"can't upgrade now"`, `"no tower selected"`, `"max level"`, `"not enough gold"` |
-| `game_sell_selected(g)` | §7.2; messages `"can't sell now"`, `"no tower selected"`; rebuilds road + re-projects |
-| `game_start_next_wave(g)` | ignored unless BUILD and not paused |
-| `game_tower_at(g,col,row)` | tower index or -1 |
+| `game_place_tower` | uses `selectedType`; auto-selects the placed tower; BUild event; errors as in §2.4 |
+| `game_can_place_at` | legality incl. hypothetical BFS; no gold check; no messages |
+| `game_upgrade_selected` | `"can't upgrade now"` / `"no tower selected"` / `"max level"` / `"not enough gold"`; adds cost to `invested`, emits UPGRADE |
+| `game_sell_selected` | `"can't sell now"` / `"no tower selected"`; refund `invested*3/4`; removes/compacts tower, rebuilds occupancy + road, re-projects, clears selection, emits SELL |
+| `game_select_tower`, `game_set_selected_type`, `game_set_cursor` | as named; invalid values ignored/clamped |
 
 ---
 
-## 4. Elements / combinations
+## 4. Damage model & status effects
 
-### 4.1 Damage multiplier matrix `[LUA]` (`main.lua:164-179`)
+### 4.1 Damage types `[SPEC]` `[CODE]`
 
-| Tower \ Enemy | FIRE | WATER | FOREST |
+| Type | Id | Flavour | Effect (on direct hits) | Strong vs | Weak vs |
+|---|---|---|---|---|---|
+| normal | 0 | GUN | none | — (1.0 everywhere) | — |
+| fire | 1 | FIRE | +1 burn stack (max 5), burn 1 dps/stack, 2.5 s, fire multipliers | HP | SHIELD, ARMOR |
+| electric | 2 | SHOCK | stun 0.30 s (enemy stops moving) | SHIELD | HP, ARMOR |
+| corrosive | 3 | CORROSIVE | drops an acid puddle at the target (0.7 cells, 5 s, 2 dps, corrosive multipliers) | ARMOR | HP, SHIELD |
+| slag | 4 | SLAG | slag 4 s: damage taken ×1.5 and speed ×0.65 | — (low base damage) | — |
+| explosive | 5 | BLASTER | AoE 1.3 cells, neutral multipliers; 3x slower cooldown, 3x damage | — | — |
+
+### 4.2 Damage multiplier matrix `[SPEC]` `[CODE]` (`kDamageMultiplier`)
+
+| damage type \ layer | HP | SHIELD | ARMOR |
 |---|---|---|---|
-| **Fire** | 1.0 | **0.5** | **2.0** |
-| **Water** | **2.0** | 1.0 | **0.5** |
-| **Forest** | **0.5** | **2.0** | 1.0 |
+| normal | 1.0 | 1.0 | 1.0 |
+| fire | **2.0** | 0.5 | 0.5 |
+| electric | 0.5 | **2.0** | 0.5 |
+| corrosive | 0.5 | 0.5 | **2.0** |
+| slag | 1.0 | 1.0 | 1.0 |
+| explosive | 1.0 | 1.0 | 1.0 |
 
-`game_damage_multiplier(towerType, enemyElement)` returns 2.0 / 1.0 / 0.5; out-of-range indices clamp to 0; default 1.0.
+Slag amplification: while `slagTimer > 0`, every damage source (direct, burn tick, acid tick, explosion) is multiplied by **1.5** on top of the layer multiplier. `game_damage_multiplier()` returns the base matrix only; the amp is applied inside `apply_damage()`.
 
-### 4.2 No combining mechanic `[LUA]`
+### 4.3 Damage resolution `[CODE]` (`apply_damage`)
 
-- No fusion, no mixed towers, no tier names, no recipes. Tower type is one `Element`; progression is the linear level 1..10 (§8).
-- `upgrade_1..6.wav` is a **random sound pool** played on any successful upgrade (`main.lua:278-282`), not six tiers or six elements.
-- `EnemySpec` (Fire/Water/Forest) is colour/name data; elites are a boolean modifier (§5).
+```
+pool = raw damage; amp = slag ? 1.5 : 1.0
+while pool > 0 and layers remain:
+    mult = game_damage_multiplier(type, layers[0].type) * amp
+    if pool * mult < layers[0].hp:
+        layers[0].hp -= pool * mult; pool = 0
+    else:
+        pool -= layers[0].hp / mult     # unspent RAW damage carries inward
+        destroy layers[0]; shift the layer stack inward (layerCount--)
+if layerCount == 0: enemy dies (+10 gold, kills++, ENEMY_DIE event)
+```
 
-### 4.3 Roster locked
+Consequences:
+- Carry-over is computed in **raw** damage, so the next layer applies **its own** multiplier (e.g. a fire hit that breaks an HP layer then hits SHIELD at 0.5x).
+- The slag ×1.5 applies to every layer and every source, including the slag tower's own hits while the target is already slagged.
+- Killing a layer shows the next layer immediately (outer ring disappears); the health bar/ring fraction is per current outer layer only.
 
-Three elements only (Fire/Water/Forest), no earth/air, no combinations — the Lead's decision, matching the Lua (the remake README's "earth, air and combinations" was aspirational, not implemented).
+Worked examples `[CODE]` tests:
+- GUN 3 raw into `[HP 5, ARMOR 100]`: first shot leaves HP 2; second shot spends 2 raw to break HP and carries 1 raw -> ARMOR takes 1 (`99`).
+- FIRE 3 raw into `[HP 3, SHIELD 100]`: HP layer absorbs `3*2.0 = 6` scaled but only had 3 hp, so it eats `3/2.0 = 1.5` raw; the other 1.5 carries and does `1.5*0.5 = 0.75` to SHIELD -> hp 99.25; the surviving target gets its first burn stack.
+- Slagged `[HP 3]` hit by GUN 3: multiplier 1.0*1.5 -> 4.5 damage -> kill and +10 gold.
+
+### 4.4 Status effects `[SPEC]` `[CODE]`
+
+| Effect | Trigger | Numbers | Tick / interaction |
+|---|---|---|---|
+| Burn | every FIRE direct hit on a surviving target | stacks `min(5, +1)`, `burnTimer = 2.5 s` (refresh, not stack timer) | Each step: `stacks * 1.0 dps * dt` **fire** damage to the outer layer (fire multipliers + slag amp), then `burnTimer -= dt`; at 0 stacks clear |
+| Stun | every SHOCK direct hit | `stunTimer = max(stunTimer, 0.30)` | While > 0 the enemy does not advance at all; no other damage effect |
+| Acid puddle | every CORROSIVE direct hit | radius 0.7 cells, life 5 s, 2.0 dps **corrosive**; max 16 live | Ticks in the status phase against every enemy inside (own layer multiplier + slag amp); when full the round-robin `puddleNext` slot is replaced |
+| Slag | every SLAG direct hit | `slagTimer = 4 s` (refresh) | Damage taken ×1.5 from all sources, movement ×0.65 |
+
+Effective status DPS vs each outer layer (before slag amp):
+
+| Source | vs HP | vs SHIELD | vs ARMOR |
+|---|---|---|---|
+| Burn, 1 stack (1.0 raw dps) | 2.0 | 0.5 | 0.5 |
+| Burn, 5 stacks (5.0 raw dps) | **10.0** | 2.5 | 2.5 |
+| Acid puddle (2.0 raw dps) | 1.0 | 1.0 | **4.0** |
+
+Slag amp multiplies all of these by 1.5. Stun freezes movement for 0.30 s: about 1.5 cells skipped at wave 1 (5 cells/s), 3.3 cells at wave 25 regular (11 cells/s), 5.94 cells for a wave-25 elite (19.8 cells/s).
+
+`[CODE]` details:
+- `burnStacks` is `uint8_t`; per-hit cap 5, independent of burn timer.
+- Statuses are attached to the enemy, not the tower, and are cleared when the enemy dies.
+- Burn/acid ticks can kill; kill rewards/events are identical to direct kills.
+- All status timers tick in the status phase, i.e. **before** movement and before towers fire in the same step.
+
+### 4.5 Explosive (BLASTER) `[SPEC]` `[CODE]`
+
+- Cooldown 3x the shared table (2.40 s at L1), damage 3x a normal L1 tower (9 at L1), both scaling with level (damage doubles, cooldown uses the 3x table).
+- Picks a target with the normal rules (nearest), then damages **every enemy within 1.3 cells of the target position** for full damage; each enemy applies its own outer-layer multipliers and slag amp. AoE damage is applied before the beam/visual is created.
+- Visual: expanding explosion ring (kind 1) centred on the impact point.
+- Burst/DPS choice `[BALANCE]`: single-target DPS is deliberately equal to a 3-damage tower (3.75 at L1) — the BLASTER pays for its AoE with cooldown, not with lower throughput; its value is hitting clumps and layer-stacked waves.
+
+### 4.6 Design note (BL2 inspiration)
+
+The six damage types, three defensive layer types, "strong/weak" multipliers, slag amplify/slow and elemental DoT are directly inspired by Borderlands 2, but **all values here are our own** (chosen for a 25-wave tower defense on a 26x13 board). Nothing is copied from BL2's tables.
 
 ---
 
-## 5. Enemies
+## 5. Enemies: layered health
 
-### 5.1 Base enemies `[LUA]` (`main.lua:158-162`, `669-689`)
+### 5.1 Layers `[SPEC]` `[CODE]`
 
-All three elements are mechanically identical; element only drives colour and the damage multiplier.
+An enemy is `layerCount` concentric layers, `layers[0]` outermost. Each layer is one of:
 
-| Element | `EnemySpec` name | Colour floats | 8-bit | HP | Speed parameter | Icon size | Kill bounty | Behaviour |
-|---|---|---|---|---|---|---|---|---|
-| Fire | "Fire" | (0.95, 0.15, 0.15) | (242,38,38) | `15 + (wave-1)*3` | `20 + (wave-1)` | 10 px orig / 5 px 3DS | +10 gold | walk road; leak at end |
-| Water | "Water" | (0.15, 0.4, 0.95) | (38,102,242) | same | same | same | +10 gold | same |
-| Forest | "Forest" | (0.15, 0.9, 0.15) | (38,230,38) | same | same | same | +10 gold | same |
-
-No attacks, armour, status effects, regeneration, splitting, collisions, or interaction with towers beyond being shot.
-
-### 5.2 Elite modifier `[LUA]` (`main.lua:674-677`, `392-409`)
-
-| Property | Normal | Elite |
+| Layer | Colour (renderer) | Meaning |
 |---|---|---|
-| HP | `15 + (wave-1)*3` | **x 2.5** |
-| Speed | `20 + (wave-1)` (Lua units) | **x 1.8** |
-| Icon size | 10 px orig / 5 px 3DS | 16 px orig / 9 px 3DS |
-| Health bar | 24x5 orig / 13x3 px 3DS, raised above the icon | same |
-| Kill bounty | +10 gold | **+10 gold** (no extra) |
-| Extra visual | — | 1 px white + gold outline rects around the icon; gold star in previews |
-| Element multiplier | applies | applies |
+| HP | red (0.95,0.18,0.18) | plain health |
+| SHIELD | blue (0.28,0.55,1.00) | energy shield |
+| ARMOR | yellow (0.95,0.78,0.18) | plated armour |
 
-Examples: wave 25 elite = 217.5 HP, speed 44 x 1.8 = 79.2 Lua units -> 19.8 cells/s.
+- **Layer count schedule** (`core_enemy_layer_count`): waves **1–3 = 1 layer**, waves **4–8 = 2 layers**, waves **9+ = 3 layers**; **elites get +1 layer, capped at 3**. So elite layer counts: waves 1–3 = 2, waves 4–8 = 3, waves 9+ = 3.
+- **Layer types** (`core_enemy_layer_types`): a deterministic hash of `(seed = Game.rng, wave, spawnSlot)`:
+  - 1 layer: one type from `hash % 3`;
+  - 2 layers: one of the 6 **ordered pairs of distinct types** (`hash % 6`);
+  - 3 layers: one of the 6 permutations of all three types (`hash % 6`).
+  Distinctness is guaranteed by construction: 2-layer enemies never repeat a type, 3-layer enemies always have exactly one of each.
+- Spawn slots: `core_spawn_slot_is_elite(slot, E)` = `slot >= 1 && slot <= E` (slot 0 regular, the E elites are consecutive, then regulars) — the same net effect as the LÖVE game.
+- `Game.rng` stays equal to the run seed: **nothing consumes the RNG during a run**, which is why `game_wave_preview()` can be exact without touching the simulation.
 
-### 5.3 Movement in cell space — **absolute speed** `[CODE]`, deviation D11
-
-The Lua moved enemies with `t += dt * speed/100` where `t` was normalised over the whole road, so a longer (mazed) road took exactly the same `100/speed` seconds — mazing bought the player **no** extra tower time. The port moves enemies at an absolute speed:
+### 5.2 HP `[SPEC]` + `[BALANCE]` `[CODE]`
 
 ```
-core_enemy_speed(wave, elite) = (20 + (wave - 1)) * (elite ? 1.8f : 1.0f)   // Lua units
-speed_cells_per_sec          = core_enemy_speed(...) * SPEED_SCALE
-SPEED_SCALE                  = 0.25f
-pathPos                     += speed_cells_per_sec * dt
+totalHP(wave, elite) = (15 + (wave-1)*3) * 2.0 * (elite ? 2.5 : 1.0)
+perLayerHP           = totalHP / layerCount          // split equally
 ```
 
-- Wave 1 regular = **5.0 cells/s**; wave 10 = 7.25; wave 25 = 11.0; wave 25 elite = **19.8**.
-- Spawn: `pathPos = 0`, position = `path.pts[0]` = entrance centre `(0.5,12.5)`.
-- Position each step = `core_path_position(&g->path, pathPos)` (segment index `(int)pathPos`, interpolate).
-- **Leak**: `pathPos >= path.length` -> remove enemy, `lives -= 1`, `leaks += 1`, `GAME_EVT_LEAK`, no gold; if `lives == 0` -> clamp 0, `PHASE_GAMEOVER`, `GAME_EVT_GAMEOVER`.
-- Road changes re-project `pathPos` onto the new road (§2.6); enemies never snap to the entrance.
+`kEnemyHpScale = 2.0f` in `data.c` is the one deliberate balance deviation from `elements-spec.md` (which specifies the un-scaled formula). It is explicitly allowed by the spec's §4 guardrail ("adjust enemy HP/speed first, not the damage table"); evidence and the rejected alternatives are in §14.6. Setting it to `1.0f` restores the literal spec numbers.
 
-**Travel time vs road length** (`[DERIVED]`, `seconds = path_length_cells / speed_cells_per_sec`; elite in parentheses):
+Examples (`[DERIVED]`):
 
-| Road length (cells) | Wave 1 (5.0 / 9.0) | Wave 10 (7.25 / 13.05) | Wave 25 (11.0 / 19.8) |
-|---:|---|---|---|
-| 25 (initial) | 5.00 (2.78) | 3.45 (1.92) | 2.27 (1.26) |
-| 40 | 8.00 (4.44) | 5.52 (3.07) | 3.64 (2.02) |
-| 60 | 12.00 (6.67) | 8.28 (4.60) | 5.45 (3.03) |
-| 80 | 16.00 (8.89) | 11.03 (6.13) | 7.27 (4.04) |
-| 100 | 20.00 (11.11) | 13.79 (7.66) | 9.09 (5.05) |
+| Wave | Layers reg/elite | Regular total HP / per layer | Elite total HP / per layer |
+|---|---|---|---|
+| 1 | 1 / 2 | 30.0 / **30.00** | 75.0 / 37.50 |
+| 4 | 2 / 3 | 48.0 / **24.00** | 120.0 / 40.00 |
+| 5 | 2 / 3 | 54.0 / **27.00** | 135.0 / 45.00 |
+| 9 | 3 / 3 | 78.0 / **26.00** | 195.0 / 65.00 |
+| 10 | 3 / 3 | 84.0 / **28.00** | 210.0 / 70.00 |
+| 20 | 3 / 3 | 144.0 / **48.00** | 360.0 / 120.00 |
+| 25 | 3 / 3 | 174.0 / **58.00** | 435.0 / 145.00 |
 
-Every extra cell of detour is extra time under fire: this is the whole point of the maze mechanic. `SPEED_SCALE` is the single balance knob (§14.6).
+Elite HP multiplier is applied before splitting, so an elite's layers are 2.5x a regular's per layer.
 
-### 5.4 Enemy visuals `[LUA]` (`main.lua:392-417`, `1001-1005`)
+### 5.3 Movement `[CODE]`
 
-- Icon = element glyph (§3.4) at radius 10 (normal) / 16 (elite) original; 3DS: 5 / 9 px.
-- Health bar every frame: centred on the enemy, width 24 -> 13 px, black background alpha 0.7, fill `(1-p, p, 0)` clamped `p`; height 5 -> 3 px (fill 2 px).
-- Elite outline rects drawn after the icon.
-- `hitFlash` (engine extra): white flash for 0.12 s after damage; cosmetic.
+- Absolute speed: `speed_cells = (20 + (wave-1)) * 0.25`, elite ×1.8 (`SPEED_SCALE = 0.25`). Wave 1 = 5 cells/s, wave 10 = 7.25, wave 25 = 11.0, wave-25 elite = 19.8 cells/s.
+- Slagged: speed ×**0.65**; stunned: speed 0 (no `pathPos` change at all; stun timer decays).
+- Leak at `pathPos >= path.length`: enemy removed, lives −1, leaks++, no gold, `GAME_EVT_LEAK`; at 0 lives -> GAMEOVER + `GAME_EVT_GAMEOVER`.
+- Road changes re-project `pathPos` (§2.5); enemies never snap to the entrance.
+- Travel time vs road length (mazing): `seconds = path length in cells / speed` — 25 cells: 5.00/3.45/2.27 s at waves 1/10/25 regular (elite 2.78/1.92/1.26); 60 cells: 12.00/8.28/5.45 s; 100 cells: 20.00/13.79/9.09 s. Every extra cell of detour is extra time under fire.
 
-### 5.5 Capacity `[PORT]`
+### 5.4 Enemy rendering `[CODE]` (`render.c draw_enemies`)
 
-`MAX_ENEMIES 128`; peak concurrent = wave size at most (waves do not overlap): wave 25 = 53. If the array fills, spawning pauses (timer clamped) and resumes — no enemy is silently lost. If it ever stayed full, the wave would stall; impossible with the current numbers.
+- Concentric rings **outside-in** at radii **6.5 / 4.6 / 2.7 px** (15 px cell), thickness **2 px**, 12 segments each, colour = layer colour with alpha `0.45 + 0.55*hpFraction`; destroyed layers are not drawn.
+- A filled core dot (r 2.3 px) in the current outer layer's colour marks the active layer.
+- Elite: extra gold glow (r 14) + white outline ring r 7.5, alpha 0.64.
+- Hit flash: white filled circle r 6.2, alpha up to 0.80, decays with `hitFlash` (0.12 s).
+- Slag: pulsing purple outline ring r 8.4 (alpha 0.45–0.80, sine).
+- Stun: pulsing white-blue filled circle r 6.5 (alpha 0.16–0.42).
+- Burn: up to 5 orange 2x2 px motes orbiting the enemy (one per stack).
+- The design-spec's 6.0/4.2/2.4 radii were nudged to 6.5/4.6/2.7 with 2 px thickness because 1.5 px rings read poorly on the 240p LCD; layer colours are exactly the spec's.
+
+### 5.5 Kill / leak rewards
+
+Kill: +10 gold, `kills++`, `enemiesAlive--`, `GAME_EVT_ENEMY_DIE`, beam/status cleanup by removal. Leak: −1 life, no gold. Both remove the enemy from the array preserving order.
+
+### 5.6 Capacity
+
+`MAX_ENEMIES 128`; maximum wave size is 53 spawns (wave 25), waves never overlap, so no overflow. If the array is full, spawning pauses (timer clamped) and resumes; no enemy is silently lost. `peek` of layers doesn't change this.
 
 ---
 
-## 6. Waves (25 total)
+## 6. Waves (25)
 
-### 6.1 Formulas `[LUA]` + `[PORT]` wave-size rule
-
-`start_wave()` (`source/core/game.c`):
+### 6.1 Formulas `[CODE]` (`data.c`)
 
 ```
-total     = 3 + wave * 2                       // wave size INCLUDING elites [PORT, D3]
-E         = 10 if wave % 25 == 0, else
-             3 if wave % 10 == 0, else
-             1 if wave %  5 == 0, else 0       // precedence %25 > %10 > %5
-regular   = total - E
-quotaFire   = quotaWater = floor(regular / 3)
-quotaForest = regular - quotaFire - quotaWater
-interval  = max(0.8, 3.0 - 0.05 * wave)         // seconds
-HP        = 15 + (wave - 1) * 3
-speedLua  = 20 + (wave - 1)                     // before SPEED_SCALE
+spawns(w)    = 3 + 2*w                                   // INCLUDING elites [v0.2 lock]
+E(w)         = 10 if w%25==0; 3 if w%10==0; 1 if w%5==0; else 0
+interval(w)  = max(0.8, 3.0 - 0.05*w)                    // seconds
+totalHP(w,e) = (15 + (w-1)*3) * 2.0 * (e ? 2.5 : 1)      // kEnemyHpScale = 2.0
+layers(w,e)  = (w<=3 ? 1 : w<=8 ? 2 : 3) + (e ? 1 : 0), capped at 3
+perLayerHP   = totalHP / layers
+speed(w,e)   = (20 + (w-1)) * (e ? 1.8 : 1) * 0.25        // cells/s
 ```
 
-- The Lua defined `baseEnemies = 3 + wave*2` and then **added** elites (`enemiesPerWave = base + E`) while computing its HUD quota from `base - E`; that is the off-by-one the port removes: the port keeps the Lua's HUD-quota formula (`regular = total - E`, fire = water = floor(regular/3)) but makes `total` the whole wave, so preview and spawns agree exactly (`[CODE]` `core_wave_total_spawns()`; tests assert preview sum == spawned count). See §14.5 Q1; this is the one content-level deviation to confirm.
-- Elite element: rolled uniformly from the RNG, **not** part of the preview quotas (the preview's elite count is exact, the element is random).
-- Regular element order: a deterministic shuffled draw from the remaining quota multiset (xorshift32), so consecutive waves do not feel identical but the multiset is exact.
+- Spawn slot 0 regular; slots 1..E elites; the rest regular.
+- First spawn one interval after NEXT WAVE; one spawn per interval (the timer subtracts the interval).
+- Layer types/HP are pure functions of `(seed, wave, slot, elite)` — preview is exact (§6.6).
 
-### 6.2 Wave table 1..25 `[DERIVED]` (authoritative port numbers)
+### 6.2 Wave table `[DERIVED]` (`HP scale 2.0` applied)
 
-`total` = spawns incl. elites; `F/W/Fo` = exact regular quotas; `I` = spawn interval; `HP` = regular HP; `Spd` = Lua speed parameter; `cross` = seconds to walk the **initial 25-cell road** (regular / elite); `eliteHP`; `gold` = max kill income.
+`E` = elites; `layers` = per-enemy layer count (regular/elite); `totLayers` = total layer count of the wave; `HP reg/elite` = total HP per enemy; `perLayer reg/elite`; `waveHP` = total HP of all spawns; `gold` = max kill income (10/spawn).
 
-| Wave | total | E | F/W/Fo | I (s) | HP | Spd | cross reg/elite (s) | eliteHP | gold |
-|---:|---:|---:|---|---:|---:|---:|---|---:|---:|
-| 1 | 5 | 0 | 1/1/3 | 2.95 | 15 | 20 | 5.00 / — | — | 50 |
-| 2 | 7 | 0 | 2/2/3 | 2.90 | 18 | 21 | 4.76 / — | — | 70 |
-| 3 | 9 | 0 | 3/3/3 | 2.85 | 21 | 22 | 4.55 / — | — | 90 |
-| 4 | 11 | 0 | 3/3/5 | 2.80 | 24 | 23 | 4.35 / — | — | 110 |
-| 5 | 13 | 1 | 4/4/4 | 2.75 | 27 | 24 | 4.17 / 2.31 | 67.5 | 130 |
-| 6 | 15 | 0 | 5/5/5 | 2.70 | 30 | 25 | 4.00 / — | — | 150 |
-| 7 | 17 | 0 | 5/5/7 | 2.65 | 33 | 26 | 3.85 / — | — | 170 |
-| 8 | 19 | 0 | 6/6/7 | 2.60 | 36 | 27 | 3.70 / — | — | 190 |
-| 9 | 21 | 0 | 7/7/7 | 2.55 | 39 | 28 | 3.57 / — | — | 210 |
-| 10 | 23 | 3 | 6/6/8 | 2.50 | 42 | 29 | 3.45 / 1.92 | 105.0 | 230 |
-| 11 | 25 | 0 | 8/8/9 | 2.45 | 45 | 30 | 3.33 / — | — | 250 |
-| 12 | 27 | 0 | 9/9/9 | 2.40 | 48 | 31 | 3.23 / — | — | 270 |
-| 13 | 29 | 0 | 9/9/11 | 2.35 | 51 | 32 | 3.12 / — | — | 290 |
-| 14 | 31 | 0 | 10/10/11 | 2.30 | 54 | 33 | 3.03 / — | — | 310 |
-| 15 | 33 | 1 | 10/10/12 | 2.25 | 57 | 34 | 2.94 / 1.63 | 142.5 | 330 |
-| 16 | 35 | 0 | 11/11/13 | 2.20 | 60 | 35 | 2.86 / — | — | 350 |
-| 17 | 37 | 0 | 12/12/13 | 2.15 | 63 | 36 | 2.78 / — | — | 370 |
-| 18 | 39 | 0 | 13/13/13 | 2.10 | 66 | 37 | 2.70 / — | — | 390 |
-| 19 | 41 | 0 | 13/13/15 | 2.05 | 69 | 38 | 2.63 / — | — | 410 |
-| 20 | 43 | 3 | 13/13/14 | 2.00 | 72 | 39 | 2.56 / 1.42 | 180.0 | 430 |
-| 21 | 45 | 0 | 15/15/15 | 1.95 | 75 | 40 | 2.50 / — | — | 450 |
-| 22 | 47 | 0 | 15/15/17 | 1.90 | 78 | 41 | 2.44 / — | — | 470 |
-| 23 | 49 | 0 | 16/16/17 | 1.85 | 81 | 42 | 2.38 / — | — | 490 |
-| 24 | 51 | 0 | 17/17/17 | 1.80 | 84 | 43 | 2.33 / — | — | 510 |
-| 25 | 53 | 10 | 14/14/15 | 1.75 | 87 | 44 | 2.27 / 1.26 | 217.5 | 530 |
+| Wave | spawns | E | layers reg/elite | totLayers | HP reg/elite | perLayer reg/elite | waveHP | gold |
+|---:|---:|---:|---|---:|---|---|---|---:|
+| 1 | 5 | 0 | 1/2 | 5 | 30.0 / 75.0 | 30.00 / 37.50 | 150 | 50 |
+| 2 | 7 | 0 | 1/2 | 7 | 36.0 / 90.0 | 36.00 / 45.00 | 252 | 70 |
+| 3 | 9 | 0 | 1/2 | 9 | 42.0 / 105.0 | 42.00 / 52.50 | 378 | 90 |
+| 4 | 11 | 0 | 2/3 | 22 | 48.0 / 120.0 | 24.00 / 40.00 | 528 | 110 |
+| 5 | 13 | 1 | 2/3 | 27 | 54.0 / 135.0 | 27.00 / 45.00 | 783 | 130 |
+| 6 | 15 | 0 | 2/3 | 30 | 60.0 / 150.0 | 30.00 / 50.00 | 900 | 150 |
+| 7 | 17 | 0 | 2/3 | 34 | 66.0 / 165.0 | 33.00 / 55.00 | 1122 | 170 |
+| 8 | 19 | 0 | 2/3 | 38 | 72.0 / 180.0 | 36.00 / 60.00 | 1368 | 190 |
+| 9 | 21 | 0 | 3/3 | 63 | 78.0 / 195.0 | 26.00 / 65.00 | 1638 | 210 |
+| 10 | 23 | 3 | 3/3 | 69 | 84.0 / 210.0 | 28.00 / 70.00 | 2310 | 230 |
+| 11 | 25 | 0 | 3/3 | 75 | 90.0 / 225.0 | 30.00 / 75.00 | 2250 | 250 |
+| 12 | 27 | 0 | 3/3 | 81 | 96.0 / 240.0 | 32.00 / 80.00 | 2592 | 270 |
+| 13 | 29 | 0 | 3/3 | 87 | 102.0 / 255.0 | 34.00 / 85.00 | 2958 | 290 |
+| 14 | 31 | 0 | 3/3 | 93 | 108.0 / 270.0 | 36.00 / 90.00 | 3348 | 310 |
+| 15 | 33 | 1 | 3/3 | 99 | 114.0 / 285.0 | 38.00 / 95.00 | 3933 | 330 |
+| 16 | 35 | 0 | 3/3 | 105 | 120.0 / 300.0 | 40.00 / 100.00 | 4200 | 350 |
+| 17 | 37 | 0 | 3/3 | 111 | 126.0 / 315.0 | 42.00 / 105.00 | 4662 | 370 |
+| 18 | 39 | 0 | 3/3 | 117 | 132.0 / 330.0 | 44.00 / 110.00 | 5148 | 390 |
+| 19 | 41 | 0 | 3/3 | 123 | 138.0 / 345.0 | 46.00 / 115.00 | 5658 | 410 |
+| 20 | 43 | 3 | 3/3 | 129 | 144.0 / 360.0 | 48.00 / 120.00 | 6840 | 430 |
+| 21 | 45 | 0 | 3/3 | 135 | 150.0 / 375.0 | 50.00 / 125.00 | 6750 | 450 |
+| 22 | 47 | 0 | 3/3 | 141 | 156.0 / 390.0 | 52.00 / 130.00 | 7332 | 470 |
+| 23 | 49 | 0 | 3/3 | 147 | 162.0 / 405.0 | 54.00 / 135.00 | 7938 | 490 |
+| 24 | 51 | 0 | 3/3 | 153 | 168.0 / 420.0 | 56.00 / 140.00 | 8568 | 510 |
+| 25 | 53 | 10 | 3/3 | 159 | 174.0 / 435.0 | 58.00 / 145.00 | 11832 | 530 |
 
-Run totals `[DERIVED]`: **725 spawns** (18 elites, 707 regulars); max kill income **7,250 gold**; +150 start = **7,400 max lifetime gold**. Wave 25 spawn span = `(53-1)*1.75 = 91.0 s`; the last spawn crosses the initial road in 2.27 s.
+Run totals `[DERIVED]`: **725 spawns**, **2,059 layers**, **725 kills -> 7,250 gold**, **93,438 total wave HP**; +150 start = 7,400 max lifetime gold. Wave 25 spawn span = `(53-1)*1.75 = 91 s`.
 
-### 6.3 Elite spawn schedule `[LUA]` -> net effect `[CODE]`
+### 6.3 Layer-type composition and preview
 
-The Lua preloaded per-elite delays and decremented them per spawn slot (`main.lua:531-556`, `656-667`). Net effect, verified against the code: **spawn slot 1 is always regular; slots 2 .. 1+E are the E elites consecutively; all other slots are regular.** The port implements exactly that (`elitePending` + slot index), with no delay-array bookkeeping (`core_wave_elite_delays()` still exists in `data.c` for reference/sim use but is not needed by `start_wave`). Tests assert the elite appears in the second spawn slot (`test_elite_spawn_stats`).
+- Waves 1–3 (1 layer): each enemy is a single random type (hash). Per-type wave totals vary with seed but sum to the spawn count.
+- Waves 4–8 (2 layers): each enemy has two different types; per-type totals vary with seed and sum to twice the spawn count.
+- Waves 9+ (3 layers): every enemy is HP+SHIELD+ARMOR in some order, so per-type totals are **exactly the spawn count each** (e.g. wave 9: 21/21/21; wave 25: 53/53/53 + 10 elites).
+- Elites: same type rules for their layer count (elites are capped at 3, so all elite layers are one of each from wave 9+; in waves 1–8 an elite has more layers than its regular wave-mates — e.g. wave 5 elite = 3 layers vs 2 for regulars).
+- `game_wave_preview()` returns total HP/SHIELD/ARMOR layer counts + elite count across the whole wave (`layerCount` summed over every spawn). It is a pure function of `(Game.rng, wave)` and exactly matches what the spawner creates; `Game.layerQuota[]` is filled with the same numbers at wave start for convenience (informational only).
+- Example preview for the deterministic preview seed `0x5EED1234` (the preview harness default) `[DERIVED]`:
 
-### 6.4 Spawning internals `[CODE]`
+| Wave | HP | SHIELD | ARMOR | ELITE | sum |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2 | 2 | 1 | 0 | 5 |
+| 3 | 5 | 1 | 3 | 0 | 9 |
+| 4 | 7 | 7 | 8 | 0 | 22 |
+| 5 | 8 | 10 | 9 | 1 | 27 |
+| 8 | 12 | 14 | 12 | 0 | 38 |
+| 9 | 21 | 21 | 21 | 0 | 63 |
+| 10 | 23 | 23 | 23 | 3 | 69 |
+| 15 | 33 | 33 | 33 | 1 | 99 |
+| 20 | 43 | 43 | 43 | 3 | 129 |
+| 25 | 53 | 53 | 53 | 10 | 159 |
 
-- First spawn happens one full interval after `game_start_next_wave()` (timer starts at 0 and increments before the check). Wave 1's first creep appears at t = 2.95 s.
-- One spawn per interval; the timer **subtracts** the interval (`spawnTimer -= spawnInterval`) rather than resetting to 0 (Lua reset to 0; subtracting keeps cadence accurate under variable step counts).
-- Spawn pauses (timer clamped to the interval) while the enemy array is full.
-- Wave start clears the selected tower, resets `waveTime`, `enemiesAlive`, quotas, elite schedule, and emits `GAME_EVT_WAVE_START`.
-- Waves never overlap: `PHASE_BUILD` is required between them.
+Real runs use their own seed (entropy from the 3DS clock via `main.c`), so 1/2-layer wave totals vary run to run; the 3-layer waves (9+) are always evenly split, and the preview is always exactly what will spawn.
 
-### 6.5 Completion, victory, game over `[LOCKED L5]` `[CODE]`
+### 6.4 Spawn internals `[CODE]`
 
-```
-check_wave_complete():
-  if phase != WAVE: return
-  if enemiesToSpawn > 0 or enemiesAlive > 0: return
-  ++wave
-  if wave > totalWaves: phase = VICTORY; event VICTORY
-  else:                 phase = BUILD
-```
+- Wave start: phase WAVE, `waveTime = 0`, `spawnTimer = 0`, `enemiesToSpawn = spawns(w)`, `spawnInterval = interval(w)`, `elitePending = E`, `eliteDelayCount = E`, `enemiesAlive = 0`, selected tower cleared, `layerQuota` staged from the preview, `GAME_EVT_WAVE_START`.
+- Each fixed step in WAVE: `spawnTimer += sdt`; while `spawnTimer >= interval` and spawns remain: subtract interval, compute `spawnSlot = spawns(w) - enemiesToSpawn`, `elite = slot in 1..E`, spawn (layer composition hash, HP split), decrement counter.
+- If `enemiesAlive >= MAX_ENEMIES`, spawning pauses (timer clamped to one interval) and resumes later.
+- Waves never overlap; there is no inter-wave timer (BUILD is player-paced).
 
-No wave retry (the Lua retried forever on any leak), no auto-chain, no leak gold. Lives are checked in the leak handler before completion; if the last leak takes lives to 0, GAMEOVER wins.
+### 6.5 Completion / victory / game over `[CODE]`
 
-### 6.6 Wave counter display
+`check_wave_complete()`: if WAVE and `enemiesToSpawn == 0 && enemiesAlive == 0`: `++wave`; if `wave > totalWaves` -> VICTORY + `GAME_EVT_VICTORY`, else BUILD. Leaks are resolved in `update_enemies` before this; lives hitting 0 sets GAMEOVER first. Old LÖVE retry-on-leak behaviour is gone.
 
-- Top HUD: phase tag + `shownWave/totalWaves` where `shownWave = min(g->wave, g->totalWaves)` (so VICTORY shows 25/25, never 26/25).
-- Bottom build panel: `"WAVE %d OF %d"` with `g->wave` (the wave NEXT WAVE will start).
-- Bottom wave panel: `"WAVE %d IN PROGRESS"`, progress bar, `ALIVE/QUEUED/KILLS/LEAKS/TOWERS/TIME`.
-- Result overlay: `"WAVE %d/%d"` with `shownWave`.
+### 6.6 HUD wave counter
 
-### 6.7 Preview API `[CODE]`
+Top HUD shows `shownWave = min(wave, totalWaves)` / `25`; bottom BUILD panel shows `WAVE %d OF %d` for the upcoming wave; bottom WAVE panel shows `WAVE %d` + progress; result screen shows the clamped value.
 
-`game_wave_preview(g,&fire,&water,&forest,&elite)` takes `g->wave` and returns the exact composition `fire+water+forest+elite == total`. It is used by the bottom BUILD preview and by the wave progress bar denominator. Tests (`test_wave_composition`) assert waves 1/4/5/10/25 => spawns 5/11/13/23/53, elites 0/0/1/3/10, fire 1/3/4/6/14, water 1/3/4/6/14, forest 3/5/4/8/15.
+### 6.7 Wave preview API
 
-### 6.8 Engine caps
+`game_wave_preview(g, &hpLayers, &shieldLayers, &armorLayers, &elites)` — see §6.3; used by the bottom INCOMING panel and by tests (`test_wave_composition`, `test_layer_composition_truthful`).
 
-`MAX_ELITE_SPAWNS 16` (max E = 10) unused by the current path; `MAX_ENEMIES 128` (max 53 alive); `MAX_BEAMS 128`; `MAX_TOWERS 96` -> message `"tower limit"`.
+### 6.8 Capacity
+
+`MAX_ELITE_SPAWNS 16` (unused by the current path; E <= 10), `MAX_ENEMIES 128` (max 53), `MAX_BEAMS 128`, `MAX_PUDDLES 16`, `MAX_TOWERS 96` -> `"tower limit"`.
 
 ---
 
-## 7. Economy & lives
-
-### 7.1 Values `[LUA]` except lives `[LOCKED L5]`
+## 7. Economy & lives (unchanged from v0.2)
 
 | Item | Value | Source |
 |---|---|---|
-| Starting gold | **150** | `main.lua:186`; `STARTING_GOLD` |
-| Starting lives | **20** | `[LOCKED]`; `STARTING_LIVES` |
-| Tower cost | 20 all types | `main.lua:131/140/149` |
-| Kill reward | **+10 gold** any enemy, elite or not | `main.lua:763`; `CORE_KILL_REWARD` |
-| Leak | **-1 life, 0 gold**, elites too | `[LOCKED L5]`; Lua paid +2/+10 and retried |
-| Blocked placement | 0 gold spent, no tower | `[CODE]` §2.5 |
-| Wave bonus | none | `[LUA]` |
-| Sell refund | `floor(invested * 0.75)`; `invested` = 20 + all upgrades paid | `main.lua:1448-1450`; `game_sell_value()` |
-| Upgrade cost (L -> L+1) | `20 * 2^(L-1)` = 20,40,80,160,320,640,1280,2560,5120 | `main.lua:1430`; `core_upgrade_cost_for_level()` |
-| Total invested at level L | `20 * 2^(L-1)` = 20..10240 | `[DERIVED]` |
-| Gold negative? | no (all spends checked) | `[LUA]` |
-| Lose | `lives <= 0` -> `PHASE_GAMEOVER` | `[LOCKED L5]` |
-| Win | clear wave 25 -> `PHASE_VICTORY` | `[LOCKED L5]` |
-| Build/upgrade/sell phases | BUILD **and** WAVE (mid-wave building matches the Lua) | `[CODE]` |
+| Starting gold / lives | **150 / 20** | `[CODE]` `STARTING_GOLD`, `STARTING_LIVES` |
+| Tower costs | GUN/FIRE/SHOCK/CORROSIVE 20, **SLAG 15**, **BLASTER 30** | `[SPEC]`/`[CODE]` |
+| Kill reward | **+10 gold**, any enemy, elite or not | `[LUA]` `CORE_KILL_REWARD` |
+| Leak | **−1 life, 0 gold** | `[CODE]` |
+| Blocked placement | 0 gold, no tower | `[CODE]` |
+| Sell refund | `floor(invested * 0.75)` (75 %) | `[LUA]`/`[CODE]` |
+| Upgrade cost | `20 * 2^(L-1)`: 20,40,80,160,320,640,1280,2560,5120 | `[LUA]`/`[CODE]` |
+| Max lifetime gold | 150 + 7,250 = **7,400** | `[DERIVED]` |
+| Win / lose | clear wave 25 / 0 lives | `[CODE]` |
 
-### 7.2 Sell & economy API `[CODE]`
-
-`game_sell_value(g,i) = tower.invested * 3 / 4` (integer floor). A successful sale: `gold += refund`; tower removed and the tower array compacted; occupancy rebuilt; **road rebuilt and enemies re-projected** (removing a wall can only shorten the road); selection cleared; `GAME_EVT_SELL`. The Lua hardcoded the base cost 20 inside `getTotalCost` (`main.lua:502-508`); the port tracks real `invested`, which is correct even if tower costs ever change.
-
-### 7.3 Income of a full 25-wave run
-
-Max lifetime gold = 150 + 7,250 (every kill claimed) = **7,400**. One tower fully maxed costs 10,240 — more than the entire run's income — so play is about many mid-level towers, not one level-10 tower. A blocked placement costs nothing (you can probe mazes for free); a leak costs a life *and* the 10 gold bounty.
-
-### 7.4 Win/lose
-
-- Lose: `lives` reaches 0 on any leak (`update_enemies` sets `PHASE_GAMEOVER`, emits `GAME_EVT_GAMEOVER`; audio plays the game-over stinger once wired).
-- Win: the wave counter passes `totalWaves` (25); `wave` becomes 26, phase `PHASE_VICTORY`, `GAME_EVT_VICTORY`.
-- Retry from either screen: fresh run at wave 1 with the same seed; MAIN MENU returns to `PHASE_MENU`.
+- Status/effect damage still awards the normal kill reward.
+- There is no income besides kills; no wave-completion bonus; no leak gold.
+- Building on the road costs 20/15/30 gold like any tower — a wall is a tower, and it still shoots.
 
 ---
 
-## 8. Upgrades
+## 8. Upgrades (unchanged curve; effect line added to the UI)
 
-### 8.1 Per-level table `[LUA]` formulas + `[DERIVED]` values
-
-On a successful upgrade (`main.lua:1425-1442`, `source/core/data.c`): cost `20*2^(level-1)` (level before upgrade), damage doubles, cooldown becomes `floor(cooldown*0.9*100)/100`, level++, `invested += cost`, gold -= cost, random upgrade sound, `GAME_EVT_UPGRADE`. Max level 10; upgrade does **not** reset the current cooldown; range never changes.
-
-| Level | Damage `[DERIVED]` | `fireRate` cooldown (s) `[DERIVED]` | Shots/s | DPS vs neutral | Upgrade cost (L -> L+1) | Total invested | Sell value |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 3 | 0.80 | 1.250 | 3.75 | 20 | 20 | 15 |
-| 2 | 6 | 0.72 | 1.389 | 8.33 | 40 | 40 | 30 |
-| 3 | 12 | 0.64 | 1.563 | 18.75 | 80 | 80 | 60 |
-| 4 | 24 | 0.57 | 1.754 | 42.11 | 160 | 160 | 120 |
-| 5 | 48 | 0.51 | 1.961 | 94.12 | 320 | 320 | 240 |
-| 6 | 96 | 0.45 | 2.222 | 213.33 | 640 | 640 | 480 |
-| 7 | 192 | 0.40 | 2.500 | 480.00 | 1280 | 1280 | 960 |
-| 8 | 384 | 0.36 | 2.778 | 1066.67 | 2560 | 2560 | 1920 |
-| 9 | 768 | 0.32 | 3.125 | 2400.00 | 5120 | 5120 | 3840 |
-| 10 | 1536 | 0.28 | 3.571 | 5485.71 | — (MAX) | 10240 | 7680 |
-
-- `damage = 3 * 2^(level-1)` exactly; the `floor` step is load-bearing (0.8*0.9^9 = 0.3099, the Lua/port value is 0.28).
-- Element multipliers stack: 2x vs weak, 0.5x vs resistant.
-- Level 10: `game_upgrade_cost()` returns -1; upgrade fails with `"max level"` before checking gold.
-- Upgrade buttons in the bottom panel show `UPGRADE <cost>G` or `MAX LEVEL`, green frame when affordable; SELL shows the refund.
-
-### 8.2 UI `[LUA]` -> shipped 3DS
-
-Bottom info panel shows `name LV.n`, `DMG <damage> RNG <range> DPS <damage/fireRate>`, plus UPGRADE/SELL buttons with prices. Selecting a tower also draws its range circle on the top board (selected bright, cursor-hovered dim). The Lua's text equivalents are in §9.3; the shipped layout is §11.3.
+- Max level 10; damage **doubles per level** `3 * 2^(L-1)` for the 3-damage towers (SLAG `1*2^(L-1)`, BLASTER `9*2^(L-1)`).
+- Cooldown from the shared table (0.80 → 0.28), multiplied by 3 for BLASTER (2.40 → 0.84).
+- Cost `20 * 2^(L-1)`; `invested` accumulates; sell = `floor(invested*0.75)`; upgrade does not reset the current cooldown; range constant.
+- Full per-level numbers in §3.4.
+- UI: bottom info panel shows `DMG / RNG / DPS` plus an **effect line** (see §9.6), and UPGRADE/SELL buttons with prices (`UPGRADE <cost>G` / `MAX LEVEL`, `SELL +<refund>G`).
 
 ---
 
-## 9. UI/HUD — original LÖVE layout (provenance reference)
+## 9. UI / HUD content (shipped 3DS implementation)
 
-The original draws a 1280x720 layout (playfield band y 0..500, HUD panel y 505..720). This section is kept because it documents where the content came from and what the port should not lose. **The shipped 3DS UI is §11**; where the two conflict, §11 is authoritative. The Lua has no lives widget and no tooltip; its info panel is the de-facto tooltip.
+The LÖVE original's 1280x720 HUD is superseded; the maze/economy content was re-laid out in v0.2 and the combat additions below are the v0.3 UI. Positions are top-screen (400x240) and bottom-screen (320x240) pixels; text uses the 8x8 font at scale 1 (8 px) or 2 (16 px).
 
-### 9.1 Fonts `[LUA]`
+### 9.1 Top HUD strip (0..37 px, top screen)
 
-Five LÖVE default-font sizes: title 36, large 26, medium 18, small 14, tiny 11 (`main.lua:1506-1510`). The 3DS uses the 8x8 bitmap font at integer scale 1 (8 px) and 2 (16 px); hierarchy is conveyed by colour/size separately (§11).
-
-### 9.2 Game HUD `[LUA]` (`main.lua:1045-1267`)
-
-Panel `rect(0,505,1280,215)` fill `(0.03,0.03,0.07,0.95)` + 1 px top line `(0.1,0.1,0.2,0.2)`.
-
-| Element | Original position | Font | Colour | Content |
+| Element | Position | Scale | Colour | Content |
 |---|---|---|---|---|
-| "WAVE" label | `printf(30,513,100,center)` | small | (0.5,0.5,0.7,0.6) | static |
-| wave number | `printf(30,538,100,center)` | title 36 | white | `wave` |
-| status | `printf(30,588,100,center)` | small | READY (1,1,0.4), ACTIVE (0.2,0.9,0.2), COMPLETE (1,1,0.3), WAITING (0.5,0.5,0.5) | READY/ACTIVE/COMPLETE/WAITING |
-| "LEFT" label | `printf(30,608,100,center)` | small | (0.5,0.5,0.7,0.5) | |
-| enemies remaining | `printf(30,628,100,center)` | large 26 | white a=0.9 | `enemiesRemaining` |
-| "WAVE ENEMIES" header | `printf(1250,513,200,right)` | small | (0.5,0.5,0.7,0.6) | **drawn off-screen right** (§14.1 B8) |
-| composition rows | y=538+24k; icon (1080,y+8) size 8; name `printf(1105,y,100,left)`; count `printf(1205,y,40,right)` `"xN"` | small | element colours; elite (1,0.8,0.2) | only count>0; Fire/Water/Forest/Elite |
-| coin | circle (30,677) r14 (1,0.8,0.2), highlight (29,676) r5.6 a0.6 (1,1,0.5), rim (0.8,0.6,0.1) | — | — | |
-| gold | `printf(55,669,80,left)` | large 26 | (1,0.9,0.3) | `gold` |
-| "SPEED" + value | `printf(150,669,60,left)` small label; value `printf(150,687,60,left)` medium | | (0.5,0.5,0.7,0.5) / white a0.8 | `PAUSED/0.5x/1x/2x/4x` |
-| "BUILD:" label | `printf(250,669,50,left)` | tiny 11 | (0.5,0.5,0.7,0.4) | |
-| build buttons | 3x `rect(310+100(i-1),667,88,38,r4)` | — | fill (0.08,0.08,0.14,0.6); selected tint a0.2 + outline a0.4 | icon (x+18,685) size 12; cost `printf(x+38,679,40,left)` tiny white a0.6 |
-| info panel | `rect(490,511,560,60)` fill (0.04,0.04,0.08,0.6), outline (0.1,0.1,0.2,0.15) | — | — | §9.3 |
-| error toast | `rect(400,530,480,35)` black a0.7; text medium 18 (1,0.2,0.2) | | | `Path blocked!` / `Not enough gold!` / `Max level reached!` |
+| Background | `rect(0,0,400,38)` | — | (0.035,0.035,0.09) | 1 px bottom line (0.20,0.20,0.38,0.45) |
+| Coin | `art_coin(14,19,6)` | — | gold/white/amber | |
+| Gold | `text(26,11)` | 2 | gold (1.00,0.82,0.24) | `%d` |
+| Heart | `art_heart(100,19,6)` | — | red (1.00,0.40,0.36) | |
+| Lives | `text(112,11)` | 2 | white | `%d` |
+| Phase tag | `text(160,5)` | 1 | PAUSED grey; WAVE green; OVER red; WIN gold; BUILD yellow | `PAUSED`/`WAVE`/`OVER`/`WIN`/`BUILD` |
+| Wave counter | `text(160,17)` | 2 | white | `min(wave,25)/25` |
+| ALIVE / TOWERS label | `text(244,5)` | 1 | light secondary (0.86,0.88,0.96) | `ALIVE` in WAVE else `TOWERS` |
+| Count | `text(244,17)` | 2 | white | `enemiesAlive` / `towerCount` |
+| SPEED label | `text(330,5)` | 1 | secondary | `SPEED` |
+| Speed value | `text(330,17)` | 2 | white, yellow if >1x | `%.0fX` |
 
-### 9.3 Info panel by build state `[LUA]` (`main.lua:1207-1257`)
+### 9.2 Board rendering (top screen)
 
-| State | Line 1 | Line 2 |
-|---|---|---|
-| BUILDING | name; `DAMAGE: d`; `COST: cG` | `PATH CELL - Building redirects enemies` or `Press A to build  \|  B to cancel` |
-| TOWER_SELECTED | name; `LV.n`; `DMG: d`; `X: costG` (green, `MAX` -> `X: MAXG`); `Y: sellG` (red) | `Press Y again to confirm sell` or `X: Upgrade  \|  Y: Sell  \|  B: Cancel` |
-| empty | — | `PATH CELL - Build here to redirect enemies` or `Press A to build a tower here` |
+- Board 26x13 at 15 px cells, origin `(5,38)`; 2 px backing lip + border.
+- Road drawn from the live `g->path` (`build_path_map`): each path cell is filled with the brown gradient `(0.24+0.10t, 0.14+0.05t, 0.05+0.03t)`, `t = pathIndex/(count-1)`; 1 px lighter shoulder `(0.40,0.27,0.11,0.90)` where road meets a non-road cell.
+- Buildable cells (0.05,0.05,0.08); 1 px grid lines `(0.14,0.14,0.22,0.30)`.
+- Tower cells get a 0.06-alpha tint of the tower's damage-type colour.
+- **Entrance/exit arrows**: green `(0.35,1.00,0.45)` at `path.pts[0]` pointing along the first segment; red `(1.00,0.35,0.30)` at the last point pointing along the last segment (black backing triangle + coloured triangle). They follow the live road.
+- Selected-tower range circle: 32 px radius (2.142857 × 15), fill alpha 0.06 + 1 px outline alpha 0.32 in the damage-type colour, plus a 2 px cell outline; the tower under the cursor (when different) gets a dim fill alpha 0.04.
+- Cursor: white fill alpha 0.07, 2 px corner brackets, edge colour by legality: white = tower, green = legal+affordable, yellow = legal but no gold, dim = blocked (entrance/exit or would seal the road); a faint filled circle + outline ghost in the selected tower's colour appears on an empty legal cell.
 
-### 9.4 Main menu `[LUA]` (`main.lua:804-878`)
+### 9.3 Enemies / status visuals
 
-Gradient background (721 one-pixel strips, `(0.02+0.03t,0.02+0.03t,0.05+0.07t)`, t=i/720); panel `rect(290,80,700,560)` (0.04,0.04,0.10,0.95) + outline (0.15,0.15,0.30,0.4); title glow at (640,200) r100 (1,0.7,0.2) a0.15; "ELEMENTAL" title 36 (1,0.9,0.4); "DEFENSE" 26 white with shadow; "Tower Defense" 18 (0.5,0.5,0.7,0.6); divider; three element icons at x=420/640/860, y=320, size 18 + glow; labels Fire/Water/Forest; START button `rect(570,400,140,55,r28)` (0.85,0.15,0.15) + shadow/highlight + "START"; hint "Press SELECT for controls"; START touch hit box (570..710, 400..455). Menu particles: 4 spawned per frame, unbounded (B9).
+See §5.4 for exact radii/alpha/colours. Draw order: board -> puddles -> portal arrows -> range circles -> towers -> beams -> enemies -> cursor.
 
-### 9.5 Controls overlay `[LUA]` (`main.lua:883-918`)
+### 9.4 Puddles, beams, explosions
 
-Full-screen black a0.90; panel (290,70,700,580); "CONTROLS" title; seven lines at `printf(380,180+50i,500,left)` (D-Pad/Touch move, A/Tap select/build, B cancel, L/R speed, X upgrade, Y twice sell, SELECT toggle); footer "Press SELECT again to close". Toggled by SELECT/TAB in both states; keys swallowed while open. Not ported as a screen (§14.5 Q4) — the bottom UI carries the hints.
+- **Puddle**: filled circle radius `0.7 cells * 15 = 10.5 px` in (0.40,0.85,0.14) alpha `0.10+0.18*lifeFraction`, 1 px rim (0.78,1.00,0.40) alpha `0.30+0.45*lifeFraction`; drawn **under** towers/enemies just above the board.
+- **Line beam** (all non-explosive towers): 3 px pass in the damage-type colour alpha `life/0.15 * 0.14`, then 1 px core alpha `life/0.15`, then 1 px white alpha `*0.55`.
+- **Explosion ring** (BLASTER): radius grows `aoeRadius * 15 * (1 - life/maxLife)`; 2 px damage-coloured ring alpha `0.90 * lifeFraction` (14 segments) + inner 1 px white ring at 0.62x radius alpha `0.40 * lifeFraction` (12 segments); life 0.30 s.
+- Damage-type colours: normal off-white (0.92,0.92,0.88), fire orange (1.00,0.45,0.12), electric cyan (0.25,0.85,1.00), corrosive acid green (0.55,1.00,0.20), slag purple (0.78,0.35,1.00), explosive amber (1.00,0.65,0.10). Text variants are lightened for legibility.
+- Layer colours: HP red (0.95,0.18,0.18), SHIELD blue (0.28,0.55,1.00), ARMOR yellow (0.95,0.78,0.18); text variants (1.00,0.60,0.56), (0.62,0.80,1.00), (1.00,0.90,0.52). Layer names `HP`, `SHIELD`, `ARMOR`.
 
-### 9.6 Playfield `[LUA]` (`main.lua:923-1040`)
+### 9.5 Bottom screen: header + six-tower palette (0..87 px)
 
-Draw order: gradient bg -> grid backdrop `rect(274,76,732,368)` (0.03,0.03,0.06) + outline -> path cells (fill `(0.2+0.08t,0.12+0.04t,0.04+0.02t)`, t = path index/length; outline (0.25,0.18,0.08,0.15)) -> cell fills (empty (0.05,0.05,0.08), tower tint a0.06, outline (0.08,0.08,0.12,0.12)) -> selected-tower range circle (r60, fill a0.06, outline a0.15) -> towers -> lasers -> enemies + health bars -> cursor (white fill a0.08, four 4x4 corner blocks a0.6, outline a0.3, yellow a0.15/a0.3 when building) -> pre-game hint (unreachable). 28 px cells at offset (276,78).
+- Header 0..31 px: same content/layout as §9.1 but 320 px wide: coin (14,16,6) + gold text (26,8,scale2); heart (100,16,6) + lives (112,8,scale2); `"WAVE"` scale1 (160,12) + `"%d/%d"` white (200,12); SPEED badge `rect(244,2,34,28)` with `%.0fX` scale2; PAUSE badge `rect(282,2,34,28)` with a two-bar pause icon (5x12 bars at x+10/x+19, y+8).
+- **Palette: six buttons in 2 rows x 3**, each `96 x 25` px:
+  - rows at y = 34 and 62; x = 6, 110, 214 (`ui_tower_button_rect`);
+  - default fill (0.07,0.07,0.13), 1 px border (0.22,0.22,0.42,0.70); selected: damage-colour fill alpha 0.18, 2 px damage-colour border, glow;
+  - icon at `(x+12, y+13)` radius 7, glow behind; display name at `(x+21, y+4)` scale 1 (selected white, else light secondary); coin at `(x+26,y+19)` r 2.5; cost at `(x+31,y+15)` scale 1 (gold if affordable, muted gold otherwise);
+  - display names (UI): **`GUN`, `FIRE`, `SHOCK`, `CORROSIVE`, `SLAG`, `EXPLOSIVE`** (the last is `TowerSpec.name = "BLASTER"`'s damage-type display name; UI shows `EXPLOSIVE`).
+  - tapping a palette button selects that damage type for building (`UI_EVENT_SELECT_TYPE`).
 
-### 9.7 Transient messages `[CODE]`
+### 9.6 Bottom screen: info / upgrade panel (y 89..155)
 
-`Game.message` + `messageTimer` are set by failed actions; `CORE_MESSAGE_TIME = 1.5 s` wall-clock (the Lua used 2.0 s of game time and swallowed the next key). The bottom screen draws the message as a red-bordered toast at `(x,35,w,18)` centred, while `messageTimer > 0`; it never blocks input. `game_clear_message()` clears it. Message strings are lowercase and short: `can't build there`, `can't build on the entrance`, `can't build on the exit`, `cell occupied`, `tower limit`, `that would block the path`, `not enough gold`, `can't build now`, `can't upgrade now`, `can't sell now`, `no tower selected`, `max level`.
+Panel `rect(4,89,312,66)`.
+
+**Tower selected (the explicitly selected tower wins; otherwise the tower under the D-pad cursor):**
+- icon `(15,96)` radius 5.5 + glow; name `"{TYPE} LV.{n}"` at `(28,91)` scale 1 in the damage-type text colour;
+- stats line `"DMG %.1f   RNG %.1f   DPS %.1f"` at `(10,104)` scale 1 (DPS = damage/cooldown);
+- **effect line** at `(10,115)` in the text colour, exact strings:
+  - FIRE: `BURNS - 2x vs HP`
+  - SHOCK: `STUNS - 2x vs SHIELD`
+  - CORROSIVE: `ACID PUDDLE - 2x vs ARMOR`
+  - SLAG: `SLAG: +50% DMG TAKEN`
+  - EXPLOSIVE: `AOE 1.3 - 3x SLOWER`
+  - GUN: `NO SPECIAL EFFECT`
+- UPGRADE button `rect(8,126,150,25)`: `UPGRADE <cost>G` or `MAX LEVEL` (green frame, dimmed if unaffordable/maxed); SELL button `rect(164,126,148,25)`: `SELL +<refund>G` (red frame).
+
+**Cursor on an empty/road cell (no tower selected):**
+- `"CURSOR C%d R%d"` at `(10,92)` scale 1 secondary; `ROAD` (gold) or `EMPTY CELL` (light) right-aligned at `(308,92)`;
+- hint at `(10,106)` scale 1:
+  - legal build on road: `ROAD - BUILD HERE TO REROUTE THEM` (green);
+  - legal build elsewhere: `A BUILDS <TYPE> FOR <cost>G` in that damage type's text colour;
+  - illegal road cell: `ROAD - THIS CELL CAN'T BE BLOCKED` (secondary);
+  - other illegal: `CAN'T BUILD HERE RIGHT NOW` (secondary);
+- `"L/R TYPE (6)   A BUILD   B CLEAR"` at `(10,121)`; `"TAP A TYPE ABOVE TO SWITCH"` at `(10,135)` (both light secondary).
+
+### 9.7 Bottom screen: INCOMING preview (BUILD phase, bottom band y 159..236)
+
+- NEXT WAVE button `rect(6,159,190,77)`: green fill (0.13,0.45,0.20), 2 px green border, glow, top highlight; `"NEXT WAVE"` scale 2 at y+10; `"WAVE %d OF %d"` scale 1 at y+34; `"PRESS WHEN READY"` scale 1 at y+48.
+- INCOMING panel `rect(202,159,112,77)`: title `INCOMING`; four rows at y+20/34/48/62, each = 3 px coloured layer dot + `"HP x%d"` / `"SHIELD x%d"` / `"ARMOR x%d"` (layer text colours) and a gold star + `"ELITE x%d"`. Counts are the **total layers across the wave** from `game_wave_preview()`.
+
+### 9.8 Bottom screen: WAVE phase panel
+
+Panel `rect(6,159,308,77)`:
+- `"WAVE %d"` scale 2 at `(14,162)` white; `"IN PROGRESS"` scale 1 right-aligned `(306,168)`;
+- progress bar `rect(14,181,292,15)` dark, fill `(16,183,288*frac,11)` orange (0.95,0.60,0.15), 1 px outline light blue-grey; `"CLEARED %d%%   LEFT %d"` centred `(160,184)` white (alpha 0.96);
+- rows: `"ALIVE %d"` (14,200), `"QUEUED %d"` (112,200), `"KILLS %d"` (212,200); `"LEAKS %d"` (14,212, red if >0), `"TOWERS %d"` (112,212), `"TIME %d:%02d"` (212,212);
+- footer `"START: PAUSE    SELECT: SPEED"` centred `(160,224)`.
+- The progress denominator is `App.waveEnemyTotal`: the largest `(enemiesAlive + enemiesToSpawn)` observed since `Game.wave` last changed (reset on wave change). Frame-rate independent; the core does not expose the wave spawn count directly.
+
+### 9.9 Menus and overlays
+
+**Bottom menu (`PHASE_MENU`)**: glow + layered title `ELEMENTAL` (scale 3 at y14, shadow y17), `DEFENSE` (scale 2 y44), `TOWER DEFENSE` (scale 1 y66); three representative icons `FIRE/ELECTRIC/SLAG` at x=80/160/240, y≈92, with glow, labels at y110; red START button `rect(50,124,220,64)` (shadow, highlight, 1 px outline) with `"START"` scale 3 at y+12 and `"TAP OR PRESS A"` scale 1 at y+44; hints at y198 `D-PAD TO BUILD - TOUCH FOR BUTTONS`, y214 `SELECT SPEED - START PAUSE`, y228 `A NATIVE 3DS REMAKE`.
+
+**Top menu**: gradient + drifting particles, title `ELEMENTAL` (scale 4, y26 with shadow), `DEFENSE` (scale 3, y70 with shadow), `TOWER DEFENSE` (scale 1, y103), divider at y116, three representative icons FIRE/ELECTRIC/SLAG at x=140/200/260, y≈148, labels y168; `"PRESS A OR TAP START"` prompt box y190–208; `"A NATIVE 3DS REMAKE"` y222.
+
+**Paused overlay (both screens)**: dim the play UI; top: panel `rect(96,72,208,92)`, `"PAUSED"` scale 3 y86, `"START TO RESUME"` y120, `"SELECT CHANGES SPEED"` y136. Bottom: panel `rect(50,24,220,196)`, `"PAUSED"` scale 3 y40, `"THE WAVE IS FROZEN"` y74, RESUME `rect(60,104,200,52)` (green, `RESUME` scale 2), MAIN MENU `rect(100,168,120,28)`, `"START ALSO RESUMES"` y208.
+
+**Result (GAME OVER / VICTORY)**: bottom: title scale 4 at y14 (`GAME OVER` red / `VICTORY!` gold), subtitle y52 (`THE PATH WAS BREACHED` / `ALL WAVES CLEARED`), stats panel `rect(30,64,260,66)` with `"WAVE %d/%d"` y71, `"KILLS %d     LEAKS %d"` y87, `"TIME %d:%02d     GOLD %d"` y103; PLAY AGAIN `rect(40,140,240,56)` green (label scale 2 y+11, `TAP TO RETRY` y+38); MAIN MENU `rect(80,204,160,28)`. Top overlay: dim 0.78 + panel `rect(60,56,280,136)`, `"VICTORY!"`/`"GAME OVER"` scale 3 y68, `"WAVE %d/%d"` y108, `"KILLS %d   LEAKS %d"` y122, `"TIME %d:%02d   GOLD %d"` y136, `"A: PLAY AGAIN    B: MENU"` y164.
+
+### 9.10 Toast
+
+Failed actions set `Game.message` + `messageTimer = 1.5 s` (real time; ticks while paused). The bottom screen draws a centred dark red-bordered box at y35 (height 18) with the message at scale 1, fading out over the last 0.4 s; messages never block input. The core clears the text when the timer expires.
+
+### 9.11 Palette (`source/render.h`)
+
+Text colours are tuned bright for the glossy 240p LCD: white (1,1,1); panel (0.05,0.05,0.12,0.96); border (0.22,0.22,0.42,0.65); border-hi (0.45,0.45,0.70,0.80); gold (1.00,0.82,0.24); gold-soft (1.00,0.92,0.45); secondary text (0.86,0.88,0.96,0.95); tertiary text (0.80,0.82,0.92,0.92); red (1.00,0.40,0.36); green (0.35,1.00,0.42); path (0.26,0.15,0.06); path edge (0.40,0.27,0.11,0.90); cell (0.05,0.05,0.08); gridline (0.14,0.14,0.22,0.30); yellow (1.00,1.00,0.35); build tag (1.00,1.00,0.45); wave tag (0.50,1.00,0.55). Damage/layer/puddle/burn/stun colours in §4.4/§5.4/§9.4.
 
 ---
 
 ## 10. Input mapping
 
-### 10.1 Original Lua controls `[LUA]` (`main.lua:1288-1458`, `1463-1488`)
+### 10.1 Original LÖVE controls (reference)
 
-| Context | Key | Behaviour |
-|---|---|---|
-| MENU | `select`/`tab` | toggle controls overlay |
-| MENU | `a`/`return`/`space` | start game |
-| any | any key while toast up | clears toast, swallows key |
-| PLAYING | `l`/`[`, `r`/`]` | speed index -/+ over {0,0.5,1,2,4} |
-| BUILDING | `left`/`a`, `right`/`d` | previous / next tower type |
-| BUILDING | `b`/`backspace` | cancel |
-| BUILDING | `a`/`return`/`space` | build; `a` unreachable (intercepted above) |
-| MOVING/TOWER_SELECTED | arrows / `w`/`s`/`a`/`d` | move cursor (clamped); leaving a tower cancels selection |
-| MOVING | `return`/`space` | enter BUILDING or TOWER_SELECTED; `a` moves left instead |
-| TOWER_SELECTED | `b` cancel, `x` upgrade, `y` arm/confirm sell | |
-| PLAYING touch | tap grid cell | sets cursor then calls `keypressed("a")` — which moves the cursor one cell left; building via touch is impossible (B1/B10) |
-| MENU touch | tap START rect | start |
+Keys: arrow keys / WASD move the build cursor; A/Return/Space build or select; B/Backspace cancel; X upgrade; Y sell (twice to confirm); L/R change speed {0,0.5,1,2,4}; SELECT/TAB toggle a controls overlay. Touch was mapped through `keypressed("a")` and was effectively broken (cursor moved left instead of building). The mouse never existed; the game was designed for a D-pad + touchscreen Vita/3DS.
 
 ### 10.2 Shipped 3DS mapping `[CODE]`
 
-The top screen is display-only on real hardware (touch exists only on the bottom screen), so the build cursor is D-pad driven and the bottom panel holds all touch controls.
+Top screen is display-only on hardware; all placement is D-pad + A, and the bottom screen is touch.
 
-| Action | Touch (bottom screen) | Buttons |
+| Action | Touch (bottom) | Buttons |
 |---|---|---|
-| start run (menu) | big START button `(50,124,220,64)` | A or Start |
-| move cursor | — (no touch map) | D-pad (up/down/left/right); cursor clamped, selection dropped if it leaves the selected tower |
-| choose tower type | one of the 3 palette buttons `(6/110/214, 34, 96x52)` | L / R cycle the type |
-| place / select | — | **A** at the cursor: if a tower is there -> select it; otherwise `game_place_tower` (works on road cells if the exit stays reachable) |
-| deselect tower | — | B |
-| upgrade / sell | UPGRADE `(8,120,150,30)` / SELL `(164,120,148,30)` | X / Y (auto-selects the tower under the cursor first if nothing is selected) |
-| start next wave | NEXT WAVE button `(6,159,190,77)` (BUILD only) | — (deliberate: no accidental A wave start) |
-| speed 1x/2x/4x | header SPEED badge `(244,2,34,28)` | Select |
-| pause / resume | header PAUSE badge `(282,2,34,28)`; paused: RESUME `(60,104,200,52)` | Start (handled before every other action; also resumes) |
-| retry / menu (result) | PLAY AGAIN `(40,140,240,56)` / MAIN MENU `(80,204,160,28)` | A retries, B goes to menu |
+| start run | START `(50,124,220,64)` on menu | A or Start |
+| move cursor | — | D-pad (clamped; leaving a tower clears its selection) |
+| choose tower type | one of the 6 palette buttons `(6/110/214, 34/62, 96x25)`; `UI_EVENT_SELECT_TYPE` | L / R cycle through all **6** types |
+| place / select | — | **A** at cursor: tower present -> select; empty -> `game_place_tower` (road allowed if exit stays reachable) |
+| clear selection | — | B (`game_select_tower(-1)`) |
+| upgrade / sell | UPGRADE `(8,126,150,25)` / SELL `(164,126,148,25)` | X / Y (auto-selects the tower under the cursor first) |
+| start next wave | NEXT WAVE `(6,159,190,77)` (BUILD only) | — |
+| speed | header SPEED badge `(244,2,34,28)` | Select |
+| pause / resume | header PAUSE badge `(282,2,34,28)`; paused: RESUME `(60,104,200,52)` | Start (handled before all other actions; also resumes) |
+| retry / menu | PLAY AGAIN `(40,140,240,56)` / MAIN MENU `(80,204,160,28)` | A retry, B menu |
 | paused -> menu | MAIN MENU `(100,168,120,28)` | — |
-| debug only | top-screen tap (preview harness only; moves cursor + selects tower) | — |
+| debug | top-screen click (preview harness only) | — |
 
-Input logic order (`app.c tick_play`): pause toggle -> (if paused: overlay touches + message tick only) -> Select speed -> touch on bottom -> D-pad -> L/R type -> A/X/Y/B -> `game_update`. This guarantees a pause press can never also trigger an action.
+Input order per frame: Start (pause) first -> paused overlay touches only -> Select (speed) -> bottom touch hit-test -> D-pad -> L/R type -> A/X/Y/B -> `game_update`. A pause press can never also trigger an action.
 
-### 10.3 Touch events `[CODE]` (`ui.h` / `ui.c`)
+### 10.3 Touch events `[CODE]`
 
-`ui_hit_test()` maps a bottom-screen touch to one `UI_EVENT_*`: START, SELECT_TYPE(index), UPGRADE, SELL, NEXT_WAVE, CYCLE_SPEED, TOGGLE_PAUSE, RESUME, RETRY, MENU. `app.c` converts them to core calls; `ui.c` never touches the simulation. Hit boxes are exported (`ui_*_rect`) and match the drawing code so the two cannot drift.
+`ui_hit_test()` -> `UI_EVENT_*` (`START`, `SELECT_TYPE(index 0..5)`, `UPGRADE`, `SELL`, `NEXT_WAVE`, `CYCLE_SPEED`, `TOGGLE_PAUSE`, `RESUME`, `RETRY`, `MENU`); `app.c` maps them to core calls. Hit boxes are the exported `ui_*_rect()` functions used by both drawing and hit-testing (no drift).
 
-### 10.4 UI feedback on the board `[CODE]`
+### 10.4 UI feedback
 
-The top renderer calls `game_can_place_at(cursor)` every frame and colours the cursor tile: white edge (tower), green edge (legal + affordable), yellow edge (legal, unaffordable), dim edge (illegal: entrance/exit or would seal the exit). A translucent ghost of the selected tower type is drawn on an empty legal cell. The bottom info panel prints `CURSOR C%d R%d`, `ROAD` or `EMPTY CELL`, and one hint line:
-- legal + road cell: `ROAD - BUILD HERE TO REROUTE THEM` (green);
-- legal + empty cell: `A BUILDS <NAME> FOR 20G`;
-- illegal road cell: `ROAD - THIS CELL CAN'T BE BLOCKED`;
-- illegal other: `CAN'T BUILD HERE RIGHT NOW`;
-plus `L/R TYPE   A BUILD   B CLEAR` and `TAP A TYPE ABOVE TO SWITCH`.
+Cursor tile edge colours: white = tower, green = can build + affordable, yellow = legal but unaffordable, dim = blocked. A translucent ghost marks a legal empty cell. The info panel hint line tells the player whether a road cell is a good build (reroute) or blocked; selected towers show their effect line. No help overlay exists (Select is speed); the pause overlay carries the control hints.
 
 ---
 
-## 11. 3DS layout (shipped implementation)
+## 11. Layout reference & mockups
 
-### 11.1 Geometry and palette `[CODE]`
+### 11.1 Geometry
 
-Top screen 400x240: board `BOARD_CELL 15`, `BOARD_X 5`, `BOARD_Y 38` -> 390x195 px, leaving a 38 px HUD strip at the top and 7 px margin at the bottom. Background is a 24-band vertical gradient `(0.02+0.03t, 0.02+0.03t, 0.05+0.07t)` (Lua's gradient, banded for speed). Palette (`source/render.h`):
+| Element | Value |
+|---|---|
+| Top screen | 400x240; board `BOARD_CELL 15`, `BOARD_X 5`, `BOARD_Y 38` -> 390x195; 38 px HUD strip; 7 px bottom margin |
+| Top HUD | §9.1 positions |
+| Bottom screen | 320x240: header 0..31, palette rows y34/y62 (96x25, x 6/110/214), info panel (4,89,312,66), bottom band y159 height 77 |
+| Board hit test | `floor((px-5)/15)`, `floor((py-38)/15)` clamped to grid |
 
-```
-cell empty        (0.05,0.05,0.08)            path cell    (0.24+0.10t, 0.14+0.05t, 0.05+0.03t)
-grid line         (0.14,0.14,0.22,0.30)       path edge    (0.38,0.25,0.10,0.85)
-panel             (0.04,0.04,0.10,0.95)       border       (0.15,0.15,0.30,0.40)
-gold              (1.00,0.80,0.20)            gold soft    (1.00,0.90,0.40)
-muted             (0.50,0.50,0.70,0.65)       dim          (0.38,0.38,0.58,0.55)
-red               (1.00,0.20,0.20)             green        (0.20,0.90,0.25)
-build tag         (1.00,1.00,0.40)            wave tag     (0.20,0.90,0.20)
-element colours identical to TowerSpec/EnemySpec (fire 0.95,0.15,0.15 etc.)
-```
+### 11.2 ASCII mockups (not to scale)
 
-Top render order: gradient -> HUD strip -> board backing/board cells -> path shoulders -> tower-cell tints -> grid lines -> border -> **entrance/exit portal arrows** -> range circles (cursor + selected) -> tower icons + level markers -> beams -> enemies + health bars -> cursor/ghost -> menu/pause/result overlays.
-
-Board drawing details `[CODE]`:
-- Path cells come from `g->path` (`build_path_map` floors each `path.pts[i]` to `(col,row)`); gradient `t = pathIndex/(count-1)`.
-- Road shoulder: a 1 px `COL_PATH_EDGE` line on each side of a road cell that faces a non-road cell (this is what makes the road readable at 240p).
-- Tower cells get a 0.06-alpha element tint; grid is 1 px lines on the whole board (not per-cell outlines).
-- **Entrance/exit markers** (`render.c draw_portal_markers`): arrows that follow the live path. Green arrow `(0.35,1.00,0.45)` at `path.pts[0]` pointing along the first segment; red arrow `(1.00,0.35,0.30)` at `path.pts[count-1]` pointing along the last segment. Each arrow = a black backing triangle (alpha 0.55, apex 7 px along, base 3 px back, half-width 5.5 px) plus the coloured triangle (apex 6 px, base 3 px back, half-width 4.5 px). Because they follow `g->path`, they move when the player reroutes the road.
-- Cursor: white cell fill a0.07, 4 corner brackets, edge colour as §10.4; ghost element glyph at 30 % alpha on a legal empty cell.
-- Range circles: 32 px radius for the selected tower (bright) and for the tower under the cursor (dim); selected tower cell gets an outline.
-- Enemy health bars 13x3 px; beams 1 px + 3 px glow at 0.15 s life.
-
-### 11.2 Top HUD strip (0..37 px) `[CODE]`
-
-| Element | Position | Scale | Colour | Content |
-|---|---|---|---|---|
-| coin | `art_coin(14,19,6)` | — | gold/white/amber | |
-| gold | `gfx_text(26,11,2)` | 2 (16 px) | gold | `%d` |
-| heart | `art_heart(100,19,6)` | — | red | |
-| lives | `gfx_text(112,11,2)` | 2 | white | `%d` |
-| phase tag | `gfx_text(160,5,1)` | 1 | PAUSED grey; WAVE green; OVER red; WIN gold; BUILD yellow | `PAUSED`/`WAVE`/`OVER`/`WIN`/`BUILD` |
-| wave counter | `gfx_text(160,17,2)` | 2 | white | `shownWave/totalWaves` (clamped to 25) |
-| ALIVE / TOWERS label | `gfx_text(244,5,1)` | 1 | muted | `ALIVE` in WAVE, `TOWERS` otherwise |
-| count | `gfx_text(244,17,2)` | 2 | white | `enemiesAlive` or `towerCount` |
-| SPEED label | `gfx_text(330,5,1)` | 1 | muted | `SPEED` |
-| speed value | `gfx_text(330,17,2)` | 2 | white, yellow if >1 | `%.0fX` |
-| HUD background | `rect(0,0,400,38)` fill (0.035,0.035,0.09) + 1 px bottom line | | | |
-
-### 11.3 Bottom screen (320x240) `[CODE]`
-
-Vertical budget: header 0..31; tower palette 34..85; info/upgrade panel 89..154; bottom section 159..236.
-
-| # | Element | Rect / position | Notes |
-|---|---|---|---|
-| B1 | header | `rect(0,0,320,32)` fill (0.035,0.035,0.09) + 1 px bottom line | |
-| B2 | gold | coin `(14,16)` r6; value scale2 at `(26,8)` gold | |
-| B3 | lives | heart `(100,16)` size6 red; value scale2 at `(112,8)` white | |
-| B4 | wave | `"WAVE"` scale1 (160,12) muted; `"%d/%d"` scale1 (200,12) white | not clamped here |
-| B5 | speed badge | `rect(244,2,34,28)`: dark fill, top highlight, 1 px border; `"%.0fX"` scale2 centered `(261,9)` | tap = cycle speed |
-| B6 | pause badge | `rect(282,2,34,28)`: same frame; two 5x12 white bars at x+10/x+19, y+8 | tap = pause/resume |
-| B7 | tower palette | 3 buttons `(6,34,96,52)`, `(110,34,96,52)`, `(214,34,96,52)` | selected: element tint a0.16 fill, 2 px element border, glow; icon at `(x+18,y+30)` size 10; name scale1 `(x+34,y+9)`; coin `(x+41,y+35)` r4; cost scale1 `(x+48,y+31)` gold/greyed |
-| B8 | info panel | `rect(4,89,312,66)` panel fill + border | selected tower: icon `(16,99)` size 5.5 + glow; `"<name> LV.n"` scale1 `(30,92)` element colour; `"DMG %.1f   RNG %.1f   DPS %.1f"` scale1 `(10,107)` muted; cursor tower: `"CURSOR C%d R%d"` `(10,93)`, `ROAD`/`EMPTY CELL` right-aligned `(308,93)`, hint line `(10,108)` per §10.4, `"L/R TYPE   A BUILD   B CLEAR"` `(10,124)`, `"TAP A TYPE ABOVE TO SWITCH"` `(10,138)` |
-| B9 | UPGRADE button | `rect(8,120,150,30)` green frame; label scale1 centred at y+11: `UPGRADE <cost>G` / `MAX LEVEL` | disabled grey when unaffordable/maxed |
-| B10 | SELL button | `rect(164,120,148,30)` red-ish frame; label `SELL <refund>G` | |
-| B11 | NEXT WAVE (BUILD) | `rect(6,159,190,77)`: green fill (0.13,0.45,0.20), 2 px green border, glow; `"NEXT WAVE"` scale2 at y+10; `"WAVE %d OF %d"` scale1 y+34; `"PRESS WHEN READY"` scale1 y+48 | |
-| B12 | INCOMING (BUILD) | `rect(202,159,112,77)` panel with title; 4 rows at y+20/34/48/62: element icon + `x<count>` | Fire/Water/Forest/Elite (elite = gold star), exact preview |
-| B13 | wave panel (WAVE) | `rect(6,159,308,77)` panel: `"WAVE %d IN PROGRESS"` `(14,163)`; progress bar `(14,174,292,16)` with orange fill `288*frac` at `(16,176,·,12)`; `"CLEARED %d%%   LEFT %d"` centred `(160,178)`; `"ALIVE %d"` `(14,196)`, `"QUEUED %d"` `(112,196)`, `"KILLS %d"` `(212,196)`; `"LEAKS %d"` `(14,208)` red if >0, `"TOWERS %d"` `(112,208)`, `"TIME %d:%02d"` `(212,208)` | LEFT = alive + queued; frac from wave size |
-| B14 | toast | `rect(x,35,w,18)` red-bordered dark box, text scale1 centred `(160,40)` | `Game.message` while timer > 0 |
-| B15 | menu screen | title art; big START `(50,124,220,64)`; element icons above | |
-| B16 | paused overlay | dim play UI; `"PAUSED"` title; `"THE WAVE IS FROZEN"` (160,74) scale1; RESUME `(60,104,200,52)`; MAIN MENU `(100,168,120,28)` | touch only, plus Start/overlay |
-| B17 | result overlay | `"GAME OVER"` (red) / `"ALL WAVES CLEARED"` (gold) title scale4 at y14; `"WAVE %d/%d"` etc.; PLAY AGAIN `(40,140,240,56)`; MAIN MENU `(80,204,160,28)` | shownWave clamped |
-
-### 11.4 ASCII mockups (not to scale)
-
-**A. Initial layout** — empty board, road = straight row 12, entrance left, exit right.
-
-Top screen 400x240:
+**A. BUILD phase** (seed default, wave 9 incoming: HP x21, SHIELD x21, ARMOR x21, ELITE x0):
 
 ```
+TOP  400x240
 +--------------------------------------------------------------------------------+
-| (o) 150   (v) 20    BUILD     1/25      TOWERS 0          SPEED 1X             |  HUD 0..37
+| (o) 150   (v) 20   BUILD    9/25      TOWERS 5            SPEED 1X             |  HUD 0..37
 +--------------------------------------------------------------------------------+
 |   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  |
 |   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  |
-|   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  |
-|   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  |
-|   ... (rows 0..11: 26x13 board, 15 px cells; only row 12 is road initially) ... |
-|   >############################>                                                |
-|   ^ entrance (0,12) green arrow                       exit (25,12) red arrow ^  |
+|   ... 26x13 board @15 px; towers drawn as coloured glyphs, road from g->path ... |
+|   >#############################>                                                |  road row 12
+|   ^ entrance green arrow                              exit red arrow ^           |
 +--------------------------------------------------------------------------------+
-| 7 px margin                                                                     |
-+--------------------------------------------------------------------------------+
-```
-
-Bottom screen 320x240:
-
-```
+BOTTOM 320x240
 +--------------------------------------------------------------------------+
-| (o) 150    (v) 20   WAVE 1/25             [1X]   [||]                    |  header 0..31
+| (o)150   (v)20   WAVE 9/25                            [1X]  [||]         |  header
 +--------------------------------------------------------------------------+
-| [ FIRE 20G ]   [ WATER 20G ]   [ FOREST 20G ]                            |  palette 34..85
+| [ GUN 20 ]  [ FIRE 20 ]  [ SHOCK 20 ]                                    |  palette row 1
+| [ CORROSIVE 20 ] [ SLAG 15 ] [ EXPLOSIVE 30 ]                            |  palette row 2
 +--------------------------------------------------------------------------+
-| CURSOR C0 R0                                              EMPTY CELL     |  info panel
-| A BUILDS FIRE FOR 20G                                                    |  89..154
-| L/R TYPE   A BUILD   B CLEAR                                             |
+| CURSOR C3 R11                                            ROAD             |
+| ROAD - BUILD HERE TO REROUTE THEM                                        |
+| L/R TYPE (6)   A BUILD   B CLEAR                                         |
 | TAP A TYPE ABOVE TO SWITCH                                               |
-| [ UPGRADE 20G ]                          [ SELL 15G ]                    |
+| [ UPGRADE 20G ]                       [ SELL +15G ]                      |
 +--------------------------------------------------------------------------+
-| [  NEXT WAVE  ]   [ WAVE 1 OF 25 ]  |  INCOMING                          |  bottom
-| [     (big)   ]   [ PRESS WHEN READY]|  F x1  W x1  Fo x3  E x0           |  159..236
+| [   NEXT WAVE   ]  WAVE 9 OF 25    | INCOMING                            |
+| [ PRESS WHEN READY ]               | * HP x21   * SHIELD x21              |
+|                                    | * ARMOR x21  * ELITE x0             |
 +--------------------------------------------------------------------------+
 ```
 
-**B. Example maze** — after the player walls the bottom rows (28 towers, exactly measured with the port BFS: path length 35 cells, i.e. +10 cells of detour; `T` = tower on road/wall, `#` = current road, `S`/`G` = entrance/exit; rows 0-6 are empty build space above the maze).
+**B. WAVE phase** — layered enemies in progress:
+
+```
+TOP
++--------------------------------------------------------------------------------+
+| (o) 150   (v) 20   WAVE     9/25      ALIVE 3            SPEED 2X             |
++--------------------------------------------------------------------------------+
+|   ... road filled from g->path; enemies are concentric red/blue/yellow rings:   |
+|   ... outer ring = current layer (hp fraction), inner rings = still-armoured,   |
+|   ... orange burn motes, purple slag ring, white stun flash as applicable.      |
++--------------------------------------------------------------------------------+
+BOTTOM
++--------------------------------------------------------------------------+
+| (o)150   (v)20   WAVE 9/25                            [2X]  [||]         |
++--------------------------------------------------------------------------+
+| [ GUN 20 ]  [ FIRE 20 ]  [ SHOCK 20 ]                                    |
+| [ CORROSIVE 20 ] [ SLAG 15 ] [ EXPLOSIVE 30 ]                            |
++--------------------------------------------------------------------------+
+| FIRE LV.3                                                        |
+| DMG 12.0   RNG 2.1   DPS 18.8                                    |
+| BURNS - 2x vs HP                                                 |
+| [ UPGRADE 80G ]                       [ SELL +48G ]                       |
++--------------------------------------------------------------------------+
+| WAVE 9                                                   IN PROGRESS     |
+| [########################--------------]  CLEARED 62%   LEFT 8           |
+| ALIVE 3    QUEUED 5    KILLS 13                                          |
+| LEAKS 0    TOWERS 5    TIME 3:24                                        |
+| START: PAUSE    SELECT: SPEED                                            |
++--------------------------------------------------------------------------+
+```
+
+**C. Example maze** (28 towers, measured with the port BFS: road length 35 cells; `T` = tower on the road/wall, `#` = current road, `S`/`G` = entrance/exit; rows 0–6 empty build space):
 
 ```
      01234567890123456789012345
@@ -885,408 +820,373 @@ Bottom screen 320x240:
 12   S..T.....T.....T.....T###G
 ```
 
-The road now runs along row 7 for 20 cells before dropping back to row 12 at col 22, so every tower in rows 8-11 gets several seconds of fire on the whole wave (wave 1: 35 cells / 5.0 cells/s = 7.0 s, vs 5.0 s on the initial road). A single tower at `(7,12)` would already force a +2-cell detour (path length 27, verified by `test_build_on_road_reroutes`).
+The road runs along row 7 for 20 cells before dropping back to row 12 at col 22. Wave 1 then takes 35/5.0 = 7.0 s to cross vs 5.0 s on the initial 25-cell road — more time under every tower's fire, on top of the maze being walled by shooting towers.
 
-### 11.5 Draw order and budget `[CODE]`
+### 11.3 Draw order & budget `[CODE]`
 
-Top: gradient (24 bands) -> HUD -> board backing -> board cells (338 fills) -> path shoulders -> tower tints (<=96) -> grid lines (25 vertical + 12 horizontal) -> border -> portal arrows (2 pairs of triangles) -> range circles (<=2) -> towers (<=96 x ~10 tris) -> beams (<=128 x 2 lines) -> enemies (<=53 x ~8 prims) -> cursor/ghost. Bottom: header + badges, palette (3 buttons x few prims), info panel + two buttons, build or wave section, toast. Worst case well under ~1500 primitives; the 3DS build is reported at a stable 60 fps in the Azahar emulator. `game_can_place_at` (338-cell BFS) is called once or twice per frame by the top renderer; acceptable.
+Top: background gradient (24 bands) -> HUD -> board backing/cells -> road shoulders -> tower tints -> grid lines -> border -> puddles -> entrance/exit arrows -> range circles -> towers -> beams -> enemies -> cursor.
+Bottom: gradient -> (menu | result | paused overlays) or header -> palette -> info panel -> toast -> build or wave band -> paused overlay.
 
-### 11.6 Stereo
+Rough worst case (wave 25: 53 enemies, up to 96 towers, 16 puddles, 128 beams): board 338 + ~40 road shoulders + 96 tower glyphs (~6 prims each) + 53 enemies x (up to 3 rings x 12 line segments + core + status overlays) is the dominant cost (~3000 line segments at worst); the 3DS build is reported stable at 60 fps in the Azahar emulator. Ring drawing is segment-based (`draw_ring`, 12–14 segments) specifically to stay inside the citro2d object budget. No image assets; all primitives.
 
-Single 2D target (`GFX_LEFT`): the game is flat 2D; duplicating the top screen for stereo would double the draw cost for no gameplay benefit. The bottom screen is 2D touch.
+### 11.4 Stereo
+
+Single 2D target (`GFX_LEFT`); the game is flat 2D, so duplicating the top screen for stereo would double cost for no gameplay benefit.
 
 ---
 
 ## 12. Audio mapping
 
-### 12.1 Current status `[CODE]`
+### 12.1 Status `[CODE]`
 
-`source/audio.c` is a **deliberate stub**: it records `GAME_EVT_*` bits (for tests/preview) but plays nothing; there is no ndsp mixer yet. The README lists sound as the next milestone. The original files are still available and should be wired through the same event bits:
+`source/audio.c` is still a **stub**: it records `GAME_EVT_*` bits for tests/preview but plays nothing (README lists audio as a later milestone). The original `.wav`/`.ogg` assets are still on disk; the event mapping below is the intended wiring. Damage types do not change audio, only beam/impact visuals.
 
-| `Game.events` bit | Intended sound (original file) | When |
+| `Game.events` bit | Intended sound | When |
 |---|---|---|
 | `GAME_EVT_BUILD` | `build.wav` | successful placement |
 | `GAME_EVT_SELL` | `sell.wav` | confirmed sale |
-| `GAME_EVT_UPGRADE` | random one of `upgrade_1..6.wav` | successful upgrade (no level/element mapping) |
-| `GAME_EVT_LASER` | `laser.wav` | tower fires; throttle globally to **0.08 s** game time (`laserSoundCooldown` in the Lua) |
-| `GAME_EVT_ENEMY_DIE` | `enemy_die.wav` | enemy killed |
+| `GAME_EVT_UPGRADE` | random one of `upgrade_1..6.wav` | successful upgrade |
+| `GAME_EVT_LASER` | `laser.wav` | any tower fires; throttle globally to **0.08 s** (LÖVE `laserSoundCooldown`) |
+| `GAME_EVT_ENEMY_DIE` | `enemy_die.wav` | enemy killed (direct hit, burn tick, acid tick, explosion) |
 | `GAME_EVT_WAVE_START` | `wave_start.wav` | NEXT WAVE |
-| `GAME_EVT_LEAK` | — (no Lua sound; optional alarm) | enemy reaches the exit |
-| `GAME_EVT_GAMEOVER` | `gameover.wav` (**never played** in the Lua) | lives reach 0 |
+| `GAME_EVT_LEAK` | — (optional alarm) | enemy reaches the exit |
+| `GAME_EVT_GAMEOVER` | `gameover.wav` (never played in the LÖVE game) | lives reach 0 |
 | `GAME_EVT_VICTORY` | — (optional jingle) | wave 25 cleared |
 
-Music in the Lua: `menu_music.ogg` loops at volume 0.5 from boot, `game_music.ogg` loops at 0.5 during play; the Lua stops menu music on run start and never pauses music. `playSound()` does `stop()` then `play()` (retrigger, no overlapping voices); `soundEnabled` is never toggled (no mute UI).
+Menu music (`menu_music.ogg`, loop, volume 0.5) on boot; game music (`game_music.ogg`, loop, 0.5) during play; LÖVE stops menu music on run start and never pauses music.
 
-### 12.2 File inventory
+### 12.2 Files
 
-| File | Bytes | Format | Est. duration (16-bit stereo 44.1 kHz assumption) | Plan |
-|---|---:|---|---:|---|
-| `build.wav` | 305,998 | WAV | ~1.73 s | keep |
-| `enemy_die.wav` | 6,318 | WAV | ~0.04 s | keep |
-| `gameover.wav` | 10,497,182 | WAV | ~59.5 s — huge | trim to 2-3 s stinger |
-| `game_music.ogg` | 3,590,538 | OGG | codec-dependent | optional |
-| `laser.wav` | 7,758 | WAV | ~0.04 s | keep, quiet, throttled |
-| `menu_music.ogg` | 1,705,932 | OGG | codec-dependent | optional |
-| `sell.wav` | 93,518 | WAV | ~0.53 s | keep |
-| `upgrade_1..6.wav` | 76,110 / 78,158 / 79,694 / 71,502 / 76,622 / 63,310 | WAV | 0.36-0.45 s each | keep |
-| `wave_start.wav` | 151,278 | WAV | ~0.86 s | keep |
+| File | Bytes | Format | Plan |
+|---|---:|---|---|
+| `build.wav` | 305,998 | WAV | keep |
+| `enemy_die.wav` | 6,318 | WAV | keep |
+| `gameover.wav` | 10,497,182 | WAV | trim to a 2-3 s stinger |
+| `game_music.ogg` | 3,590,538 | OGG | optional |
+| `laser.wav` | 7,758 | WAV | keep, throttled |
+| `menu_music.ogg` | 1,705,932 | OGG | optional |
+| `sell.wav` | 93,518 | WAV | keep |
+| `upgrade_1..6.wav` | 63–80 KB each | WAV | keep |
+| `wave_start.wav` | 151,278 | WAV | keep |
 
-### 12.3 3DS audio recommendations
+### 12.3 3DS recommendations
 
-- Convert SFX to 16-bit mono 22050 Hz (or IMA-ADPCM) and embed with `bin2s`; a 1 s mono 22.05 kHz clip is 44 KB. Whole SFX set < 400 KB.
-- Trim `gameover.wav` (10.5 MB is unacceptable) to a 2 s stinger (~88 KB).
-- Music: no OGG decoder in libctru. Either omit (music optional), or pre-decode a 15-30 s loop to mono 22.05 kHz PCM and loop from RAM (0.7-1.5 MB), or integrate a streaming decoder (v2). Do not decode OGG at runtime while rendering.
-- `ndsp`: >= 8 SFX channels + music channels; implement the 0.08 s laser throttle exactly (one global cooldown), driven by `Game.events` + `game_clear_events()` once per frame (already wired in `app.c`).
+- SFX to 16-bit mono 22050 Hz (or IMA-ADPCM) embedded with `bin2s` (<400 KB total); `gameover.wav` trimmed to ~2 s.
+- Music: no OGG decoder in libctru — omit, or pre-decode a 15–30 s loop to mono 22.05 kHz PCM and loop from RAM. Never decode OGG while rendering.
+- `ndsp` with >=8 SFX channels + music channels; implement the 0.08 s laser throttle, driven by `Game.events` and `game_clear_events()` once per frame (already wired in `app.c`).
 
 ---
 
-## 13. What likely made the old 3DS attempt fail (evidence)
+## 13. What likely made the old 3DS attempt fail (historical evidence)
 
-1. **Absolute 1280x720 layout, no resolution independence.** `love.conf` demands 1280x720 (`main.lua:11-18`), `love.window.setMode(1280,720,...)` (`main.lua:1495-1501`), and every UI coordinate is absolute: HUD at y 505..720, info panel x 490..1050, grid offset x=276, menu panel 700x560. On 400x240 you see the top-left corner only (part of the title; columns 1-4 of the field; the HUD is entirely below the screen). This is the README's "half the screen cut off".
-2. **Per-frame immediate-mode primitive count.** `drawGradientBackground` draws **721 filled rectangles every frame** (`main.lua:437-443`); the field does 338 cells/frame with an `isPathCell()` linear scan (`main.lua:949-968`, `482-490`); icons are 6-10-vertex polygons; five TrueType fonts are rasterized. Through LovePotion on the ARM11 every primitive is a CPU draw; likely the fps killer.
-3. **Unbounded per-frame allocations on the menu.** 4 particle tables per frame with no cap (`main.lua:600-615`) -> ~600 live Lua tables; plus a laser table per shot and four neighbour tables per BFS node.
-4. **BFS cost/hitching.** `findPath()` allocates neighbour tables, uses `table.remove(queue,1)` (O(n) shift), and runs **twice on every successful build** (`main.lua:1362-1364`) plus once per sell. Maze building — the core strategy — is exactly when the pathfinder is stressed. The port keeps the mechanic but re-implements it with fixed arrays and a single hypothetical pre-check; the BFS is now ~1.7 KB of stack and <=338 cells, negligible against rendering.
-5. **Audio memory/decode.** 10.5 MB `gameover.wav`, 3.6 + 1.7 MB OGGs; OGG streaming decode competes with rendering on the ARM11, loading dominates boot.
-6. **Touch controls fought keyboard emulation (fatal).** `love.touchpressed` sets the cursor then calls `love.keypressed("a")` (`main.lua:1463-1488`). In `MOVING`, `a` means "cursor left" (`main.lua:1387-1393`), so every tap moved the cursor one cell left; entering `BUILDING` needs `return`/`space`, which touch cannot send; in `BUILDING`, `a` is intercepted to cycle type (`main.lua:1336-1340`). The game was unbuildable on touch-only hardware; only menu START worked. The port has no top-screen touch and a proper D-pad cursor + bottom-button UI.
-7. **No performance escape hatches:** no batching, no atlas, no culling, no reduced-detail mode, no fixed timestep, no resolution factor.
-8. **The game had no end state:** leaks paid gold and restarted the wave forever, so it could neither be won nor lost (`main.lua:779-798`) — looked broken at any frame rate.
+1. **Absolute 1280x720 layout, no resolution independence** (`main.lua:11-18`, `1495-1501`; HUD at y505..720, grid at x276, menu panel 700x560). On a 400x240 screen only the top-left corner is visible — the README's "half the screen cut off".
+2. **Per-frame immediate-mode primitives**: 721 rects for the gradient every frame, 338 cells/frame with an `isPathCell()` linear scan, polygon glyphs, five TrueType fonts. On the ARM11 via LovePotion that was the likely fps killer.
+3. **Unbounded menu allocations** (4 particle tables/frame, no cap), plus a laser table per shot and four neighbour tables per BFS node.
+4. **BFS cost/hitching**: table-queue `table.remove(...,1)` and double BFS per build. The port keeps the mechanic but re-implements it with fixed stack arrays and a single hypothetical pre-check (~1.7 KB of stack, <=338 cells).
+5. **Audio memory/decode**: 10.5 MB gameover.wav + 5.3 MB OGGs.
+6. **Touch controls fought keyboard emulation (fatal)**: `touchpressed` called `keypressed("a")`, which in MOVING state meant "cursor left" — on touch-only hardware the game was unbuildable. The port has no top-screen touch and a proper D-pad + bottom-button UI.
+7. **No performance escape hatches** (no batching, culling, fixed timestep, resolution factor).
+8. **No end state**: leaks paid gold and restarted the wave forever; the game could neither be won nor lost.
 
-The C rewrite removes 1-7 structurally: fixed 400x240/320x240 layout (§11), a portable deterministic core with fixed pools (§15), a cheap BFS (§2.8), a fixed-step loop, touch-native input (§10), and proper endings (§1.4).
+The C rewrite removes 1–7 structurally (fixed 400x240/320x240 layout, deterministic fixed-pool core, cheap BFS, fixed-step loop, touch-native UI) and gives it proper endings. The LÖVE original's three-element combat did not survive at all — it was replaced by the BL2-inspired v0.3 model documented above.
 
 ---
 
 ## 14. Known bugs / unclear bits
 
-### 14.1 Original defects and how the port handles them
+### 14.1 Original LÖVE defects and how the port handles them
 
 | ID | Lua ref | Defect | Port behaviour |
 |---|---|---|---|
-| B1 | `main.lua:1336-1344`, `1387-1393`, `1406-1415` | `a` aliased to "cursor left"/"previous type" before the confirm branch; keyboard A never builds/selects; help text lies | A is a real confirm button; D-pad moves the cursor (§10.2) |
-| B2 | `main.lua:698-707`, `779-798` | Leaks paid +2/+10 gold and retried the same wave forever; no lives/game over/victory | lives 20, -1 per leak, 0 gold, wave advances, game over at 0, victory at wave 25 |
-| B3 | `main.lua:644-648`, `1031-1039`, `1295-1301` | Intended build-before-wave-1 phase is dead code (menu confirm starts a wave immediately) | `game_new_run` starts in `PHASE_BUILD`; wave 1 only on NEXT WAVE |
-| B4 | `main.lua:794-798` | Waves auto-chain in the same frame; COMPLETE status never visible | player-paced BUILD phase; no auto-chain, no timer |
-| B5 | `main.lua:63-69`, `1350-1376` | BFS seeded the start cell unconditionally, so a tower could be built on the spawn cell (enemy spawned inside); the Lua validated by mutating + rolling back | entrance `(0,12)` AND exit `(25,12)` rejected; hypothetical BFS pre-check; rejection costs nothing; message `"that would block the path"` |
-| B6 | `main.lua:558-565` | HUD quotas computed from `base - E`; port's exact-quota rule makes the whole wave `3+2*wave` including elites (see Q1) | `game_wave_preview` sum == spawned count; tests assert it |
-| B6b | `main.lua:573-576` | Spawner ignored the quotas and rolled every element randomly | exact quotas, shuffled order (§6.4) |
-| B7 | `main.lua:1235-1237` | `"X: MAX" .. "G"` renders `X: MAXG` | bottom button shows `MAX LEVEL` |
-| B8 | `main.lua:1103` | right-aligned header drawn off-screen (right edge 1450) | composition moved to the bottom INCOMING panel |
-| B9 | `main.lua:600-615` | 4 particle tables/frame, no cap; life and maxLife rolled independently | renderer-local particle pool (`MENU_PARTICLE_COUNT`), capped; no per-frame allocation |
-| B10 | `main.lua:883-918`, `1463-1488` | help overlay/toast do not block touch; overlay blocks keys only; top touch sets cursor to the left cell | no help screen; no top touch on hardware; toast never blocks input |
-| B11 | `main.lua:1311-1314` | toast swallows one key press | toast is display-only |
-| B12 | `main.lua:188` | global `state` vs `gameState` | `GamePhase` + cursor/selection, no build-mode globals |
-| B13 | `main.lua:136`, `145`, `154`, `159-161` | `glowColor` never read | kept in specs, no behaviour |
-| B14 | `main.lua:502-508` | `getTotalCost` hardcodes base cost 20 | `Tower.invested` tracked exactly |
-| B15 | `main.lua:199`, `201`, `764` | `gameTime`/`totalKills` written, never displayed | `kills`, `leaks`, `timeTotal` shown in the wave panel and result screen |
-| B16 | `main.lua:263` | `gameover.wav` loaded, never played | wired to `GAME_EVT_GAMEOVER` once audio exists |
-| B17 | `main.lua:206`, `570`, `783-792` | `waveRetry`/`enemiesThatPassed` retry loop | removed; leaks cost lives and the wave advances |
-| B18 | `main.lua:413-417` | health-bar width could go negative past 0 hp | fill fraction clamped 0..1 |
-| B19 | `main.lua:217-219`, `1316-1325` | speeds {0, 0.5, 1, 2, 4}; pause is a speed hack | 1/2/4 + separate pause overlay |
-| B20 | `main.lua:140-145` | multiplier 1.0 fallbacks | kept as default 1.0 |
+| B1 | `main.lua:1336-1344`, `1387-1393`, `1406-1415` | `a` aliased to "cursor left"/"previous type" before the confirm branch; A never builds; help text lies | A is a real confirm; D-pad moves the cursor (§10.2) |
+| B2 | `main.lua:698-707`, `779-798` | Leaks paid +2/+10 gold and retried forever; no lives/game over/victory | 20 lives, −1 per leak, wave advances, victory at 25 |
+| B3 | `main.lua:644-648`, `1031-1039` | Dead pre-wave build phase (menu starts wave immediately) | `game_new_run` starts in BUILD; wave 1 only on NEXT WAVE |
+| B4 | `main.lua:794-798` | Auto-chain waves; COMPLETE never visible | Player-paced BUILD phase |
+| B5 | `main.lua:63-69`, `1350-1376` | BFS seeded the start cell, so towers could be built on the spawn cell; validate-by-mutate-then-rollback | entrance AND exit protected; hypothetical pre-check; rejection costs nothing |
+| B6 | `main.lua:558-565` | HUD composition quota computed from `base - E` while the wave was `base + E` | v0.2 exact-quota rule; v0.3 layer preview is exact (§6.3) |
+| B7 | `main.lua:1235-1237` | `"X: MAX" .. "G"` -> `MAXG` | bottom button shows `MAX LEVEL` |
+| B8 | `main.lua:1103` | right-aligned HUD header drawn off-screen | composition moved to bottom INCOMING panel |
+| B9 | `main.lua:600-615` | 4 particle tables/frame, no cap | renderer-local capped particle pool |
+| B10 | `main.lua:883-918`, `1463-1488` | help overlay/toast don't block touch; top touch fires `keypressed("a")` | no top touch; no help screen; toast never blocks input |
+| B11 | `main.lua:1311-1314` | toast swallows one key | display-only toast |
+| B12 | `main.lua:188` | global `state` vs `gameState` | `GamePhase` + cursor/selection; no build-mode globals |
+| B13 | `main.lua:136-161` | `glowColor` fields never read | now used: towers/enemies/palette draw with spec glow (§3.1/§9) |
+| B14 | `main.lua:502-508` | `getTotalCost` hardcoded base cost 20 (all towers cost 20) | `Tower.invested` tracks the actual cost (SLAG 15 / BLASTER 30 included) |
+| B15 | `main.lua:199-201`, `764` | `gameTime`/`totalKills` written, never displayed | kills/leaks/time shown in wave panel + result |
+| B16 | `main.lua:263` | `gameover.wav` loaded, never played | wired to `GAME_EVT_GAMEOVER` (when audio lands) |
+| B17 | `main.lua:206`, `570`, `783-792` | `waveRetry`/`enemiesThatPassed` retry loop | removed; leaks cost lives |
+| B18 | `main.lua:413-417` | health-bar width could go negative | layer health fraction clamped 0..1 before drawing |
+| B19 | `main.lua:217-219`, `1316-1325` | speeds {0,0.5,1,2,4}; pause is a speed hack | 1/2/4 + separate pause overlay |
+| B20 | `main.lua:140-145` | multiplier fallback 1.0 | `game_damage_multiplier` clamps out-of-range to 1.0/normal |
+| B21 | `main.lua:164-179` (old model) | three identical-stat elements with a rock-paper-scissors table | replaced by the six damage types / three layers; the old matrix is gone |
 
-### 14.2 Deliberate deviations from the Lua (do not "fix back")
+### 14.2 Deliberate deviations from the LÖVE original and `elements-spec.md`
 
-| # | Deviation | Lua |
+| # | Deviation | Source/why |
 |---|---|---|
-| D1 | Build phase between waves, player-paced NEXT WAVE, no inter-wave timer | instant same-frame auto-chain |
-| D2 | 20 lives; leak = -1 life, 0 gold; game over at 0 | no lives; leak paid +2/+10 and retried forever |
-| D3 | Wave size `3+2*wave` **including** elites; exact quotas so the preview is truthful (see Q1) | wave size `base+E`, HUD quota from `base-E`, random elements |
-| D4 | Victory after wave 25; `totalWaves = 25`; `wave` becomes 26 on victory (display clamps) | endless, no victory |
-| D5 | Pause overlay; speed 1/2/4 only (no 0.5x, no 0x speed) | speed 0/0.5/1/2/4, no pause UI |
-| D6 | L/R = tower type; Select = speed; Start = pause; no help screen | L/R = speed; SELECT = help; no pause |
-| D7 | Game-over/victory screens + `gameover.wav` | missing state, unused sound |
-| D8 | 3DS layout 400x240/320x240, 8x8 font, board at (5,38), 24-band gradient, no top-screen touch, bottom-only touch UI | 1280x720, TrueType fonts, 721-line gradient, mouse/touch on the field |
-| D9 | Toast never swallows input; message 1.5 s wall-clock (ticks while paused/4x) | 2.0 s game-time, swallows the next key |
-| D10 | Fixed 1/60 s timestep | variable LÖVE dt |
-| **D11** | **Enemy speed is absolute cells/s**: `(20+wave-1) * 0.25 * (elite?1.8:1)`; road length matters (`SPEED_SCALE` is the single knob) | `t += dt*speed/100` normalised over the whole path: crossing time `100/speed` s regardless of road length, so mazing bought no time |
-| D12 | Entrance and exit cells are never buildable; live enemies are re-projected spatially onto the rerouted road (nearest point, keep progress) | start cell buildable (spawn-inside-tower bug); enemies' world position recomputed from normalised `t` |
-| D13 | Blocked placement is pre-checked with a hypothetical BFS (one BFS, no mutation, message `"that would block the path"`) | mutate board, BFS, roll back (`"Path blocked!"`, two BFS on success) |
+| D1 | Build phase between waves, player-paced NEXT WAVE | v0.2 lock |
+| D2 | 20 lives; leak = −1 life, 0 gold; game over at 0 | v0.2 lock |
+| D3 | Wave size `3+2*wave` INCLUDING elites; exact composition preview | v0.2 exact-quota lock |
+| D4 | Victory after wave 25; `wave` becomes 26, display clamps to 25 | v0.2 lock |
+| D5 | Pause overlay; speed 1/2/4 only | v0.2 lock |
+| D6 | L/R = damage type, Select = speed, Start = pause; no help screen | v0.2 lock |
+| D7 | Game-over/victory screens + gameover.wav | v0.2 |
+| D8 | 3DS layout/rendering: 400x240/320x240, 8x8 font, board at (5,38), segment rings, no top touch | v0.2 + v0.3 |
+| D9 | Toast never swallows input; 1.5 s wall-clock timer | v0.2 |
+| D10 | Fixed 1/60 s timestep | v0.2 |
+| D11 | Absolute enemy speed (`SPEED_SCALE 0.25`) instead of path-normalised | v0.2; makes mazing meaningful |
+| D12 | Entrance and exit unbuildable; enemies re-projected after reroutes | v0.2 |
+| D13 | Blocked placement pre-checked with a hypothetical BFS (no mutate/rollback) | v0.2 |
+| **D14** | **Enemy HP ×2.0** (`kEnemyHpScale`) vs the literal spec formula. Single constant, allowed by elements-spec §4. Without it, mixed and GUN-only armies both trivially clear 25/25; with it, GUN-only dies on wave 3 and a mixed army clears 25/25 with 0–1 leaks. Set to 1.0f for literal spec values. | `[BALANCE]` §14.6 |
+| D15 | Layer composition from a **deterministic hash of (run seed, wave, spawn slot)** rather than free per-spawn RNG rolls. Same distribution; makes `game_wave_preview()` exact and runs reproducible. | `[CODE]` §5.1 |
+| D16 | On-hit statuses only apply to the surviving target of a **direct** hit; explosions never apply statuses (they have none anyway); burn/acid ticks never retrigger. Burn stack count is capped and refreshed; the timer is refreshed, not stacked. | `[CODE]` §4.4 |
+| D17 | BLASTER cooldown is **3x the shared cooldown table at every level** (2.40 s at L1, 0.84 s at L10); the spec only pins the L1 2.40 s value. | `[CODE]` interpretation |
+| D18 | Slag amplification applies to the slag tower's own hit too if the target is already slagged (single damage funnel) | `[CODE]` |
+| D19 | Acid puddles: 16-slot pool; when full the round-robin `puddleNext` slot is replaced (not strictly the oldest-created puddle) | `[CODE]` |
+| D20 | UI displays the damage-type names (`GUN/FIRE/SHOCK/CORROSIVE/SLAG/EXPLOSIVE`) while `TowerSpec.name` for the last is `"BLASTER"` | `[CODE]` `ui.c` |
+| D21 | LÖVE original's three-element model (Fire/Water/Forest, identical stats) is not ported at all; the combat model is new design (BL2-inspired, our numbers). | `[SPEC]`/v0.3 |
+| D22 | `hitFlash` (0.12 s white flash) is a renderer-only addition, not in the LÖVE game | `[CODE]` |
 
 ### 14.3 Behaviours kept intentionally
 
-- Dynamic BFS road, towers on the road, detours, blocked-build rejection (§2).
-- Hitscan towers with a 0.15 s beam visual, nearest-target tie-break by spawn order, cooldown semantics (§3).
-- Damage matrix, costs, kill rewards, upgrade curve, sell refund, enemy HP/speed formulas, spawn interval, elite schedule (§4-§8).
-- Building/upgrading/selling during a wave (the Lua allows it); only NEXT WAVE is build-phase-only.
-- Elite spawns burst at slots 2..1+E (what the Lua actually does, §6.3).
-- Element glyph geometry and palette; menu particle drift; ASCII-safe pixel art.
+- Dynamic BFS maze road, towers on the road, blocked-build rejection, enemy re-projection (§2).
+- Hitscan attacks with instant damage; nearest-target default with "oldest wins ties"; fixed 0.15 s beam visuals.
+- Wave counts/intervals, economy, upgrade curve, sell refund, lives/victory rules (§6–§8).
+- Building/upgrading/selling mid-wave; only NEXT WAVE is build-phase-only.
+- Elite slot rule (slot 0 regular, elites consecutive); kill reward flat +10.
+- Pixel-art vocabulary: element glyph shapes for towers, `font8x8` text, palette identity colours.
 
 ### 14.4 Decisions already resolved (no action needed)
 
 | Item | Resolution |
 |---|---|
-| Path mechanic | **Dynamic BFS restored**; towers on road; blocked builds refused; enemies re-projected (L1-L3) |
-| Enemy speed | **Absolute cells/s**, `SPEED_SCALE 0.25` (L4/D11) |
-| Entrance/exit | Both unbuildable; entrance/exit messages (L2/D12) |
-| Waves / victory | 25 waves, victory after 25, `totalWaves 25` (L5) |
-| Lives / leaks | 20 lives, -1 per leak, no leak gold (L5) |
-| Build phase | Player-paced between waves; building also allowed mid-wave (L6) |
-| Element roster | Three only, no combining (§4.3) |
-| Exact quotas | Preview must equal the wave; implementation uses wave size incl. elites (L8/D3, Q1 below) |
-| Speed levels | 1/2/4 + pause (D5) |
-| Controls | A confirm, B deselect, X/Y upgrade/sell, L/R type, Select speed, Start pause (D6/§10.2) |
-| Tower cap | `MAX_TOWERS 96`, message `"tower limit"` |
-| Sell refund | `floor(invested * 0.75)` (Lua-confirmed 75 %) |
-| Message timer | 1.5 s wall-clock, no input swallowing (D9) |
+| Combat model | BL2-inspired six damage types x three layers, statuses, AoE (`elements-spec.md`) |
+| Maze mechanic | dynamic BFS restored; towers on road; blocked builds refused; enemies re-projected |
+| Speed | absolute cells/s, `SPEED_SCALE 0.25` |
+| Layers | 1/2/3 by wave, elites +1 capped 3; deterministic type hash; exact preview |
+| HP | spec total HP formula × `kEnemyHpScale 2.0`, split equally across layers |
+| Damage resolution | single funnel `apply_damage()`; raw-damage carry-over; slag ×1.5 amp |
+| Statuses | burn 5x1 dps/2.5 s; stun 0.30 s; acid puddle 0.7/5 s/2 dps/16 slots; slag 4 s ×1.5 dmg/×0.65 speed |
+| Targets | nearest; FIRE→HP, SHOCK→SHIELD, CORROSIVE→ARMOR outer-layer preference; fallback nearest; ties oldest |
+| Explosive | BLASTER 3x cooldown/damage, AoE 1.3, neutral multipliers, explosion-ring visual |
+| Economy | costs 20/20/20/20/15/30; kill +10; leak −1 life/0 gold; sell 75 %; upgrades 20·2^(L−1) |
+| Victory | wave 25 cleared; lives 0 -> game over |
+| Controls | D-pad + A place/select, L/R type (6), X upgrade, Y sell, Select speed, Start pause |
 
-### 14.5 Still genuinely ambiguous / needs sign-off
+### 14.5 Open questions / things to confirm
 
-- **Q1 — wave size between the Lua and the port.** The Lua's actual spawn total was `(3+2w) + E` but its HUD quota was computed from `(3+2w) - E` (both wrong in different directions). The port chose total = `3+2w` including elites (`regular = total - E`), which keeps `game_wave_preview()` exactly truthful. This changes wave totals vs the Lua: wave 5 is 13 spawns (Lua 14), wave 10 is 23 (Lua 26), wave 25 is 53 (Lua 63). If the intended reading is "keep Lua spawn totals", the fix is confined to `core_wave_total_spawns()` + `start_wave()` + the §6.2 table; confirm which is wanted.
-- **Q2 — entrance + exit protection.** The Lua let the entrance be built on (spawn-inside-tower bug). The port rejects both. Confirm this is the desired rule (it also makes `core_path_exists` simple).
-- **Q3 — mazing strength / balance.** Absolute speed (D11) means a long maze multiplies the time under fire, but the current sim says the mechanic is **functional yet not mandatory**: both the "plain" AI (36 towers beside a 25-cell straight road) and the "maze" AI (59 towers, 95-cell road) win 25/25 with 0 leaks (3 seeds, `tools/sim.c`). `SPEED_SCALE` is a pacing knob, not a strategy separator (it only starts to separate playable-looking runs at absurd 8-16x scales where enemies tunnel through 1/60 s range checks). Making the maze necessary is a **content** decision (exponential HP growth, upgrade damage x1.5 instead of x2, or an economy squeeze) and needs the Lead's sign-off — see §14.6. Until then the maze is a strategic option/optimisation, and the initial straight road (only rows 10-11 can cover it) is the baseline.
-- **Q4 — in-game help.** There is no help screen (Select is speed). The bottom UI has static hint lines. If a help overlay is wanted, use the paused overlay (it has room) — new UI work.
-- **Q5 — audio.** Current `audio.c` is a stub; decide whether v1 ships SFX only (recommended) or includes a pre-decoded music loop. `gameover.wav` must be trimmed either way; the original `.wav`s are still on disk.
-- **Q6 — blocked-build message text.** Port uses `"that would block the path"` (Lead's wording) rather than the Lua's `"Path blocked!"`; purely cosmetic, keep unless the original string is wanted for nostalgia.
+- **Q1 — HP scale sign-off.** Shipped `kEnemyHpScale = 2.0f` (deviation D14). The sim evidence supports it (§14.6), but it is the one number that departs from `elements-spec.md`; changing it to 1.0 is a one-line edit (and makes the element system cosmetic again).
+- **Q2 — "BLASTER" vs "EXPLOSIVE" naming.** `TowerSpec.name` says `BLASTER`; the UI/effect line says `EXPLOSIVE`. Cosmetic; pick one before localisation.
+- **Q3 — BLASTER cooldown curve.** 3x the whole cooldown table (current) vs only the L1 value pinned by the spec. Current choice is documented (D17); confirm.
+- **Q4 — puddle replacement semantics.** Round-robin slot replacement works but is not literally "oldest". Fine for gameplay; note if strict oldest matters.
+- **Q5 — deterministic layer hash vs free RNG.** Hash gives exact preview and reproducibility; if a future change starts consuming `Game.rng`, `game_wave_preview()` must be updated together with it (`NOTES.md` §1).
+- **Q6 — audio/music** still stubbed; decide SFX-only vs a pre-decoded music loop, trim `gameover.wav`.
+- **Q7 — no in-game help screen** (Select = speed); the pause overlay only has hints. Add a help panel only if desired.
+- **Q8 — README still describes the old three-element model** (`README.md` lines about Fire/Water/Forest) — docs outside this file are stale and should be updated by their owners.
 
-### 14.6 Balance notes
+### 14.6 Balance evidence (`tools/sim.c` + `NOTES.md` §9)
 
-- **Mazing is the intended core counterplay**: every extra road cell is extra time under fire at the current absolute speed (§5.3 table). A 35-cell example maze (28 towers) makes wave 1 take 7.0 s instead of 5.0 s; a 100-cell maze turns wave 1 into 20 s under fire.
-- **Sim evidence (`tools/sim.c`, 3 seeds, current numbers):** both scripted players clear all 25 waves with 0 leaks — the "plain" AI (builds beside the road only, 36 towers, 25-cell road, 36 kills/wave income) and the "maze" AI (builds on the road using `core_path_length_with_block()`, 59 towers, final road 95 cells). CPU 0.03 s / 0.05 s for a whole run. So the maze mechanic works and is rewarded (less fire-time pressure, more safety margin) but is **not yet required**. Options to make mazing necessary, for sign-off (not applied): (1) exponential HP growth, e.g. `hp = 15 * 2^((wave-1)/3)` instead of linear; (2) upgrade damage multiplier x1.5 instead of x2 with a cheaper cost curve; (3) economy squeeze (e.g. kill reward 10 -> 5, tower cost 20 -> 25). `SPEED_SCALE` should stay 0.25 (or only be touched for pacing): it does not separate the strategies at playable speeds.
-- The initial straight road is only reachable by towers in rows 10-11 and the road row itself (range 2.142857 cells; dy=1 covers +/-1.895 cells, dy=2 covers +/-0.769 cells, dy=3 out of range). Wave 1 with 150 gold (7 towers) is therefore tight; the player is expected to maze early.
-- Kill income over a full run is 7,250 + 150 gold, while one level-10 tower costs 10,240: the intended curve is many mid-level towers, not one maxed tower.
-- Wave 25 (53 spawns incl. 10 elites, interval 1.75 s, elite HP 217.5) is the intended finale; on a well-mazed board the time-under-fire is what decides it.
-- Enemy HP grows linearly while tower damage doubles per level, so late-run damage is hugely overkill; the gold budget is the limiting factor, as intended.
-- Leaks cost both a life and the 10-gold bounty (double punishment, D2); no wave-completion bonus exists.
+Global enemy HP multiplier sweep (damage table/economy untouched):
+
+| enemy HP | mixed AI (cycles damage types) | plain-GUN AI (neutral only) |
+|---|---|---|
+| ×1.0 (literal spec) | VICTORY 25/25, 0 leaks | VICTORY 25/25, 0 leaks |
+| **×2.0 (shipped)** | **VICTORY 25/25, 1 leak** | **GAMEOVER wave 3, 0 kills, 20 leaks** |
+| ×3.0 | VICTORY 25/25, 1 leak | GAMEOVER wave 3, 0 kills |
+| ×4.0 | GAMEOVER wave 4 | GAMEOVER wave 3 |
+
+Final runs at HP×2.0, SPEED_SCALE 0.25, seeds 1337/1/424242/999999 (identical verdicts): mixed `VICTORY 25/25`, 19–20 lives, 0–1 leaks, 724–725 kills, 36 towers, road 25 cells (~0.1 s CPU); maze variant `VICTORY 25/25`, 20/20 lives, 0 leaks, 725 kills, 36 towers, road 49 cells (~0.13 s); plain-GUN `GAMEOVER wave 3`, 0 lives, 20 leaks, 0 kills, 7 towers.
+
+Interpretation: the maze/element system now matters — bringing the right damage types is required, mazing adds a safety margin, and ignoring elements loses by wave 3. `SPEED_SCALE` remains the pacing knob; `kEnemyHpScale` is the difficulty knob. All other numbers are as specified.
 
 ---
 
-## 15. Implementation guide (actual repo layout)
+## 15. Implementation guide
 
 ### 15.1 File responsibilities `[CODE]`
 
 | File | Owns |
 |---|---|
-| `include/game.h` | frozen core API, `Game`/`Tower`/`Enemy`/`Beam`/`Path` structs, phases, events, constants. Append-only additions: `stepAccumulator`, `spawnQuota` |
-| `include/gfx.h` | two-screen immediate drawing API: clear/rect/circle/line/triangle + 8x8 bitmap text |
-| `source/core/core_internal.h` | private core contract: start/goal, fixed-step/message/beam constants, BFS/path queries, speed formula, wave formulas |
-| `source/core/data.c` | content tables (`TowerSpec`, `EnemySpec`), damage matrix, per-level stats, upgrade cost, sell value, wave formulas, `core_enemy_speed_cells()` + `SPEED_SCALE 0.25` |
-| `source/core/grid.c` | **BFS road** (`core_build_path`, `core_path_exists`, `core_path_length_with_block`), path contains/position, cell centres, placement legality (`game_can_place_at`), `game_tower_at` |
-| `source/core/game.c` | lifecycle, fixed-step update, spawning/quotas, movement/leaks, **re-projection**, towers/beams, wave completion, actions (`place/upgrade/sell/start wave`), messages, RNG, economy, lives |
-| `source/render.c` / `.h` | top screen: gradient, HUD strip, board + live path + shoulders + entrance/exit arrows, towers, range circles, beams, enemies, cursor/ghost, menu/pause/result overlays, shared pixel-art helpers |
-| `source/ui.c` / `.h` | bottom screen: header + speed/pause badges, tower palette, info/upgrade panel, NEXT WAVE/incoming preview, wave panel, paused/result/menu screens, touch hit-testing (`UiEvent`) |
-| `source/app.c` / `.h` | scene state machine (MENU/BUILD/WAVE/paused/result), input -> action mapping, particles, event dispatch to audio, draw both screens |
-| `source/main.c` | `aptMainLoop`, `hidScanInput` polling, frame timing |
-| `source/plat_3ds.c` | citro2d/citro3d backend for `gfx.h` |
-| `source/audio.c` | audio stub (records `GAME_EVT_*`, no playback yet); the ndsp mixer slots in behind the same API |
-| `tests/test_core.c` | host tests (39 tests) incl. path/BFS, maze long route, blocked placement, reprojection, speed-vs-path-length, waves, victory, fail states, events/messages, capacity |
-| `tools/sim.c` | headless auto-play balance sim with two players: `sim.exe` (plain, builds beside the road) and `sim.exe --maze` (greedy mazing using `core_path_length_with_block()`); see §14.6 for results |
-| `tools/preview/*` | PC software-renderer preview harness (`gfx.h` backend writing PNGs; supports top-screen click debug) |
+| `include/game.h` | frozen core API: `DamageType`, `LayerType`, `EnemyLayer`, `Puddle`, `Beam.kind/radius`, `TowerSpec.damageType/aoeRadius`, `Game.puddles/puddleNext/layerQuota`, preview multiplier APIs |
+| `include/gfx.h` | two-screen immediate drawing API (clear/rect/circle/line/triangle + 8x8 text) |
+| `source/core/core_internal.h` | private constants: status-effect extern consts, maze constants, wave formulas, layer composition API |
+| `source/core/data.c` | **all content**: 6 `TowerSpec`s, damage matrix, cooldown/upgrade tables, status constants, wave formulas, `kEnemyHpScale`, `SPEED_SCALE`, layer count/type hash, `game_wave_preview` |
+| `source/core/grid.c` | dynamic BFS road, reachability, placement legality, path queries |
+| `source/core/game.c` | lifecycle, fixed-step update, spawning, layered `apply_damage`, status effects, puddles, targeting/AoE, wave completion, economy, lives, actions, RNG (seed only), re-projection |
+| `source/render.c` / `.h` | top screen: background, HUD strip, board + live road + shoulders + entrance/exit arrows, range circles, towers (6 glyphs), beams/explosion rings, enemy layer rings + status overlays, puddles, cursor, menu/pause/result overlays; shared pixel-art helpers + colour tables |
+| `source/ui.c` / `.h` | bottom screen: header + badges, 2x3 tower palette, info/effect/upgrade panel, NEXT WAVE + INCOMING layer preview, wave progress panel, menu/paused/result screens, touch hit-testing |
+| `source/app.c` / `.h` | scene state machine, input -> action mapping, menu particles, `waveEnemyTotal` progress bookkeeping, event dispatch to audio |
+| `source/main.c` | `aptMainLoop`, `hidScanInput` polling, frame timing, run seed entropy |
+| `source/plat_3ds.c` | citro2d backend for `gfx.h` |
+| `source/audio.c` | audio stub (records events, no playback yet) |
+| `tests/test_core.c` | 46 host tests: towers/matrix/upgrades, maze/path/projection, wave composition + layer counts + truthful preview, all damage types, layer carry, burn/stun/puddle/slag, AoE, targeting, beams, movement/leaks, fail states, victory, determinism, speed/pause, events/messages, capacity |
+| `tools/sim.c` | headless balance sim: mixed army (default), `--maze`, `--plain` GUN baseline |
+| `tools/preview/*` | PC software-renderer preview harness (`gfx.h` backend, PNG frames) |
 
-### 15.2 Content tables to implement (exact values, `data.c`)
-
-```
-TowerSpec[3] = {
-  { "Fire",   20, 3.0f, 0.8f, 2.142857f, {0.95,0.15,0.15}, {0.95,0.30,0.10} },
-  { "Water",  20, 3.0f, 0.8f, 2.142857f, {0.15,0.40,0.95}, {0.10,0.50,0.95} },
-  { "Forest", 20, 3.0f, 0.8f, 2.142857f, {0.15,0.90,0.15}, {0.10,0.90,0.30} },
-}
-EnemySpec[3] = { "Fire", "Water", "Forest" } with the same colours/glows
-game_tower_stats(type, level, *damage, *fireRate, *range):
-  damage   = 3 * (1 << (level-1))     // 3 .. 1536
-  fireRate = {0.80,0.72,0.64,0.57,0.51,0.45,0.40,0.36,0.32,0.28}[level-1]
-  range    = 2.142857f                // constant
-core_upgrade_cost_for_level(L) = L >= 10 ? -1 : 20 << (L-1)
-game_sell_value(g,i)           = tower.invested * 3 / 4
-game_damage_multiplier(t,e)    = { {1,.5,2}, {2,1,.5}, {.5,2,1} }[t][e]
-core_wave_base_enemies(w)      = 3 + 2*w
-core_wave_elite_count(w)       = w%25==0 ? 10 : w%10==0 ? 3 : w%5==0 ? 1 : 0
-core_wave_total_spawns(w)      = base(w)            // includes elites (D3/Q1)
-core_wave_spawn_interval(w)    = max(0.8, 3.0 - 0.05*w)
-core_enemy_hp(w, elite)        = (15 + (w-1)*3) * (elite ? 2.5 : 1)
-core_enemy_speed(w, elite)     = (20 + (w-1)) * (elite ? 1.8 : 1)      // Lua units
-core_enemy_speed_cells(w, e)   = core_enemy_speed(w,e) * 0.25f        // cells/s (D11)
-```
-
-### 15.3 Lifecycle `[CODE]`
-
-- `game_init(g)`: `memset`, `PHASE_MENU`, wave 1, totalWaves 25, gold 150, lives 20, `selectedType = FIRE`, `selectedTower = -1`, speed 1, cursor `(0,0)`, fixed non-zero RNG, spawnInterval for wave 1.
-- `game_new_run(g, seed)`: `game_init` then `PHASE_BUILD`, wave 1, gold/lives, speed 1, `seed` (0 -> fixed), `core_build_path()` (initial straight row-12 road), spawnInterval. Cursor stays `(0,0)`.
-- `game_start_next_wave(g)`: ignored unless BUILD and not paused.
-
-### 15.4 Step/update contract `[CODE]`
-
-- `game_update(dt)`: clamp to 0.25 s; if paused only `tick_message(dt)`; else accumulate and run up to 6 `game_step(1/60)`; drop leftover on cap.
-- `game_step(dt)`: §1.5 exactly; no allocation; deterministic given `rng`; `dt` clamped to 0.25 and multiplied by speed inside.
-- Events/messages are state; the platform clears events each frame (`app.c` -> `audio_play_event()` -> `game_clear_events()`).
-
-### 15.5 Action contracts `[CODE]`
-
-| Function | Contract | Failure messages |
-|---|---|---|
-| `game_place_tower` | §2.5; uses `selectedType`; auto-selects new tower; rebuilds road + reprojects | `can't build now`, `can't build there`, `can't build on the entrance`, `can't build on the exit`, `cell occupied`, `tower limit`, `that would block the path`, `not enough gold` |
-| `game_upgrade_selected` | level<10, gold>=cost; `invested += cost`; event UPGRADE | `can't upgrade now`, `no tower selected`, `max level`, `not enough gold` |
-| `game_sell_selected` | refund `invested*3/4`, remove+compact, rebuild occupancy + road, reproject, clear selection, event SELL | `can't sell now`, `no tower selected` |
-| `game_select_tower` | valid index selects, anything else clears | — |
-| `game_set_cursor` | clamps | — |
-| `game_set_selected_type` | ignores invalid | — |
-| `game_toggle_pause` | toggles; resets step accumulator | — |
-| `game_cycle_speed` | 1 -> 2 -> 4 -> 1 | — |
-| `game_can_place_at` | pure predicate incl. hypothetical BFS, no gold check, no messages | — |
-| `game_clear_events` / `game_clear_message` | zero the fields | — |
-
-### 15.6 Dynamic road + re-projection reference
-
-BFS (fixed arrays, no allocation; exact neighbour order up/down/left/right):
+### 15.2 Content tables (`data.c`, exact values)
 
 ```
-visited[13][26]=false; parent[338]=-1; queue[338]; head=tail=0
-queue[tail++] = index(0,12); visited[0][12]=true
-while head<tail:
-    cur=queue[head++]; if cur==index(25,12): found; break
-    for (dc,dr) in {(0,-1),(0,1),(-1,0),(1,0)}:
-        n=(cur%26+dc, cur/26+dr)
-        skip OOB / visited / wall(occupancy or hypothetical block)
-        visited=true; parent[n]=cur; queue[tail++]=n
-if !found return 0
-walk parent from goal -> start, count cells, write centres -> Path.pts, length = count-1
+TowerSpec kTowerSpecs[6] = {
+  {"GUN",       20, 3.0f, 0.80f, 60.0f/28.0f, DMG_NORMAL,    0.0f, {0.75,0.75,0.78},{0.45,0.45,0.50}},
+  {"FIRE",      20, 3.0f, 0.80f, 60.0f/28.0f, DMG_FIRE,      0.0f, {0.95,0.45,0.12},{0.95,0.30,0.05}},
+  {"SHOCK",     20, 3.0f, 0.80f, 60.0f/28.0f, DMG_ELECTRIC,  0.0f, {0.25,0.80,1.00},{0.10,0.60,1.00}},
+  {"CORROSIVE", 20, 3.0f, 0.80f, 60.0f/28.0f, DMG_CORROSIVE, 0.0f, {0.45,0.85,0.15},{0.30,0.80,0.10}},
+  {"SLAG",      15, 1.0f, 0.80f, 60.0f/28.0f, DMG_SLAG,      0.0f, {0.70,0.25,0.90},{0.60,0.15,0.85}},
+  {"BLASTER",   30, 9.0f, 2.40f, 60.0f/28.0f, DMG_EXPLOSIVE, 1.3f, {1.00,0.70,0.15},{1.00,0.50,0.05}},
+};
+damage multiplier matrix (rows damage type, cols HP/SHIELD/ARMOR):
+  normal {1,1,1}  fire {2,.5,.5}  electric {.5,2,.5}  corrosive {.5,.5,2}  slag {1,1,1}  explosive {1,1,1}
+cooldown table: {0.80,0.72,0.64,0.57,0.51,0.45,0.40,0.36,0.32,0.28}   // BLASTER x3
+upgrade cost:   {20,40,80,160,320,640,1280,2560,5120,0}
+status: burn max 5 / 2.5s / 1 dps/stack; stun 0.30s; puddle r0.7 / 5s / 2 dps / 16 max;
+        slag 4s / x1.5 dmg / x0.65 speed; explosion visual 0.30s
+balance: kEnemyHpScale = 2.0f; SPEED_SCALE = 0.25f
+wave: spawns = 3+2w; E = 10/3/1 on %25/%10/%5; interval = max(0.8, 3.0-0.05w);
+      totalHP = (15+(w-1)*3) * kEnemyHpScale * (elite?2.5:1); layers as §5.1
 ```
 
-Re-projection after every rebuild:
+### 15.3 Layer composition hash (`core_enemy_layer_types`, exact)
 
 ```
-for each active enemy:
-    bestT = 0; bestD2 = INF
-    for i in 0..path.count-2:
-        t = clamp(dot(e.xy - a, b-a)/|b-a|^2, 0, 1)      // |b-a| == 1 by construction
-        d2 = |e.xy - (a + t*(b-a))|^2
-        if d2 < bestD2: bestD2 = d2; bestT = i + t
-    e.pathPos = clamp(bestT, 0, path.length)
-    e.xy = path_position(path, e.pathPos)
+h = seed
+h ^= wave * 0x9E3779B1
+h ^= (spawnSlot+1) * 0x85EBCA77
+h ^= h >> 16
+h *= 0x7FEB352D; h ^= h >> 15
+h *= 0x846CA68B; h ^= h >> 16
+count = layer_count(wave, elite)
+1 layer  -> type = h % 3
+2 layers -> ordered pair from 6: {(HP,SH),(SH,HP),(HP,AR),(AR,HP),(SH,AR),(AR,SH)}[h % 6]
+3 layers -> permutation from 6: {(HP,SH,AR),(HP,AR,SH),(SH,HP,AR),(SH,AR,HP),(AR,HP,SH),(AR,SH,HP)}[h % 6]
 ```
 
-Initial road: `(0,12),(1,12),...,(25,12)` — 26 cells / 25 segments. Example 28-tower maze (measured with this BFS): path length 35; grid in §11.4B. Single tower at `(7,12)` -> length 27 (test-verified).
+`seed` is `Game.rng` = the run seed; nothing advances it during a run. `game_wave_preview()` iterates all spawn slots of `g->wave` with the same function, so it is exact by construction. If a future feature starts consuming the RNG, the preview must be changed to use the same state.
 
-### 15.7 Acceptance tests (39 host tests currently passing; the key ones this spec pins)
+### 15.4 Action / event contracts
 
-| Test | Expected |
-|---|---|
-| initial path | count 26, length 25.0, all centres `(i+0.5, 12.5)`, `pathBlocked == false`, start/exit centres `(0.5,12.5)` / `(25.5,12.5)` |
-| build on road | place at `(7,12)`: `towerCount 1`, gold 130, `game_tower_at(7,12)==0`, path length 27, `(7,12)` not on road, `(7,11)` or `(7,13)` is |
-| blocking placement | after fence `(24,12)`, `(25,11)` refused: no gold change, no tower, occupancy empty, message contains "block", road intact; selling the fence reopens it |
-| entrance/exit | `game_can_place_at` false for `(0,12)`/`(25,12)`; messages contain "entrance"/"exit"; no gold/tower change |
-| sell | selling `(7,12)` restores length 25 and refunds 15 (gold 130+15) |
-| speed vs path length | wave 1 after 1 s: `pathPos == 5.0` on both a straight and a much longer mazed board (absolute speed D11) |
-| re-projection | a mid-wave build/sell reroutes successfully and leaves every enemy with `0 <= pathPos <= path.length`, no teleport to entrance, no crash |
-| world positions | `game_cell_center(25,12) == (25.5,12.5)` |
-| wave composition | waves 1/4/5/10/25 -> spawns 5/11/13/23/53, elites 0/0/1/3/10, fire 1/3/4/6/14, water same, forest 3/5/4/8/15; preview sum == spawns; quotas staged; `enemiesToSpawn == size` |
-| spawn intervals | waves 1/4/5/10/25/60 -> 2.95/2.80/2.75/2.50/1.75/0.80 |
-| elite stats | wave 5 regular HP 27, elite HP 67.5, elite in spawn slot 2 |
-| exact quotas | spawn everything with a tiny interval, count elements/elites == preview |
-| victory | clearing waves 1..25 leaves `phase == PHASE_VICTORY`, `wave == 26`, `totalWaves == 25` |
-| maze long route | scripted walls at cols 4/8/12/16 with alternating row gaps (48 towers) -> path length > 60, `pathBlocked == false`, integrity holds |
-| idle player loses | no towers, auto-start every BUILD: exactly 20 leaks, lives 0, `PHASE_GAMEOVER`, `wave == 3` (5+7+8 leaked) |
-| game-over freezes | GAMEOVER freezes `waveTime`/`kills`; `game_step(5.0)` and `game_start_next_wave()` do nothing |
-| fixed-step accumulator | `game_update(5/240)` advances 1/60 s; `game_update(10.0)` caps at 6 steps and drops the rest; five `1/240` updates accumulate to 1/60 s |
-| events | BUILD/UPGRADE/SELL/WAVE_START/LASER/ENEMY_DIE bits set and OR-accumulated until `game_clear_events` |
-| messages | failure sets `message`, `messageTimer == 1.5`; self-expires (BUILD ticks it); `game_clear_message` zeroes; long text truncates safely |
-| capacity | full enemy array pauses spawning (nothing lost); full beam array drops the VFX but still damages; full tower array rejects with `"tower limit"` |
-| pause / speed | pause freezes the sim and resets the accumulator; `game_cycle_speed` 1 -> 2 -> 4 -> 1 |
-| selection / cursor | `selectedType` ignores invalid values; cursor clamps; placing auto-selects the new tower; `game_select_tower(-1)` clears |
-| placement guards | MENU/VICTORY reject placement with a message; `game_can_place_at` false there too |
-| upgrade curve | costs 20..5120, `invested == 20 * 2^level` after reaching level L, max-level message, damage 1536 |
-| determinism | same seed + same call sequence -> byte-identical `Game` (39 tests total) |
+- Placement errors in §2.4 order (lowercase, 1.5 s toast): `can't build now`, `can't build there`, `can't build on the entrance`, `can't build on the exit`, `cell occupied`, `tower limit`, `that would block the path`, `not enough gold`.
+- Upgrade: `can't upgrade now`, `no tower selected`, `max level`, `not enough gold`.
+- Sell: `can't sell now`, `no tower selected`.
+- Events: BUILD/SELL/UPGRADE on success; LASER per shot; ENEMY_DIE per kill (any source); WAVE_START per wave; LEAK per leak; GAMEOVER/VICTORY on transitions. OR-accumulated until `game_clear_events()`; platform clears once per frame after dispatching audio.
+- `game_clear_message()` zeroes message + timer.
 
-### 15.8 Performance / memory
+### 15.5 Step/update contract
 
-- `sizeof(Game) == 12364` bytes (~12 KB) — keep the single instance static/global, not on the stack (`NOTES.md`).
-- Core step: O(towers + enemies) with fixed pools; no allocations; squared-distance range checks.
-- Path BFS: <=338 cells x 4 neighbours, ~1.7 KB of stack; runs on placement/sale plus a per-frame cursor legality query — trivial at 60 fps.
-- Renderer: <= ~1500 primitives/frame (§11.5); 8x8 bitmap text; the game is reported at a stable 60 fps in the Azahar emulator.
-- Audio: stub today; when wired, <=8 SFX channels + 1 music stream; 0.08 s laser throttle mandatory.
+- `game_update(dt)`: clamp 0.25 s; paused -> tick message only; else accumulate and run <=6 fixed `1/60 s` steps, drop the rest on cap.
+- `game_step(dt)`: §1.1 exactly; no allocations; deterministic from seed; dt clamped and speed-scaled inside.
+- `paused` freezes battlefield + accumulator; message timers keep ticking.
+- `game_toggle_pause()` resets the accumulator; `game_cycle_speed()` 1->2->4->1.
+
+### 15.6 Perf / memory
+
+- `sizeof(Game) = 18,960` bytes; `sizeof(Enemy) = 72`, `Tower = 20`, `Puddle = 28`, `Beam = 32`. Keep the single `Game` static — 19 KB stack is too much for the 3DS main thread.
+- No dynamic allocation anywhere in the core; no libc math (squared distances); all pools fixed.
+- BFS: <=338 cells x 4 neighbours, ~1.7 KB stack, once per build/sale plus the per-frame cursor legality query.
+- Renderer worst case ~3000 line segments (wave 25, 53 layered enemies with status overlays) plus board/towers/UI; `draw_ring` uses 12–14 segments to stay inside the citro2d object budget; no image assets.
+- Audio stub today; when wired, <=8 SFX channels + 1 music stream, 0.08 s laser throttle.
 
 ---
 
 ## Appendix A — constants reference
 
 ```c
-/* grid / road (include/game.h + core_internal.h) */
+/* grid / road */
 #define GRID_COLS 26
 #define GRID_ROWS 13
-#define MAX_PATH_CELLS (GRID_COLS * GRID_ROWS)   /* 338 */
+#define MAX_PATH_CELLS (GRID_COLS*GRID_ROWS)   /* 338 */
 #define CORE_START_COL 0
 #define CORE_START_ROW 12
 #define CORE_GOAL_COL 25
 #define CORE_GOAL_ROW 12
-#define CORE_TOTAL_WAVES 25
-#define CORE_KILL_REWARD 10
-#define CORE_MESSAGE_TIME 1.5f
-#define CORE_BEAM_LIFE 0.15f
-#define CORE_HIT_FLASH_TIME 0.12f
-#define CORE_FIXED_STEP (1.0f/60.0f)
-#define CORE_MAX_STEPS_PER_UPDATE 6
-#define CORE_MAX_UPDATE_DT 0.25f
-#define CORE_MAX_STEP_DT 0.25f
-#define SPEED_SCALE 0.25f                        /* cells/s per Lua speed unit */
 
-/* screen layout (render.h / ui.c) */
-#define BOARD_CELL 15.0f
-#define BOARD_X 5.0f
-#define BOARD_Y 38.0f
-#define BOARD_W 390.0f
-#define BOARD_H 195.0f
-#define HUD_H 38.0f
-/* bottom-screen strips: header 32, palette y34 h52, panel x4 y89 w312 h66,
-   bottom y159 h77; buttons per §11.3 */
-
-/* economy */
-#define STARTING_GOLD 150
-#define STARTING_LIVES 20
-#define TOWER_COST 20
-#define MAX_LEVEL 10
+/* v0.3 combat pools */
+#define TOWER_TYPE_COUNT 6
+#define MAX_LAYERS 3
+#define MAX_PUDDLES 16
 #define MAX_TOWERS 96
 #define MAX_ENEMIES 128
 #define MAX_BEAMS 128
 
-/* per-level tables */
-static const int   UPGRADE_COST[10] = {20,40,80,160,320,640,1280,2560,5120,0};
-static const float FIRE_RATE[10]    = {0.80f,0.72f,0.64f,0.57f,0.51f,0.45f,0.40f,0.36f,0.32f,0.28f};
-static const int   DAMAGE[10]       = {3,6,12,24,48,96,192,384,768,1536};
-/* invested = 20 << (level-1); sell = invested * 3 / 4 */
+/* timing / plumbing */
+#define CORE_FIXED_STEP (1.0f/60.0f)
+#define CORE_MAX_STEPS_PER_UPDATE 6
+#define CORE_MAX_UPDATE_DT 0.25f
+#define CORE_MAX_STEP_DT 0.25f
+#define CORE_MESSAGE_TIME 1.5f
+#define CORE_BEAM_LIFE 0.15f
+#define CORE_HIT_FLASH_TIME 0.12f
+#define CORE_TOTAL_WAVES 25
+#define CORE_KILL_REWARD 10
+
+/* content / balance */
+#define TOWER_RANGE_CELLS (60.0f/28.0f)        /* 2.142857 */
+#define TOWER_BASE_COOLDOWN 0.80f
+static const float kEnemyHpScale = 2.0f;       /* [BALANCE] D14 */
+static const float kEnemySpeedScale = 0.25f;   /* D11 */
+/* status: burn 5 / 2.5s / 1.0 dps-stack; stun 0.30s; puddle 0.7 / 5.0s / 2.0 dps;
+   slag 4.0s / 1.5 amp / 0.65 speed; explosion visual 0.30s */
+
+/* screen layout */
+#define BOARD_CELL 15.0f
+#define BOARD_X 5.0f
+#define BOARD_Y 38.0f
+#define HUD_H 38.0f
+/* bottom bands: header 32, palette y34/y62 (96x25 at x 6/110/214),
+   info panel x4 y89 w312 h66, bottom band y159 h77 */
 ```
 
 ## Appendix B — renderer cheat-sheet
 
 ```
-cell -> top px:     px = 5 + cellX * 15;  py = 38 + cellY * 15;  cell = 15 px
-range radius:       2.142857 * 15 = 32.14 -> 32 px
-road:               for i in 0..path.count-1: fill cell floor(path.pts[i]);
-                    gradient (0.24+0.10t, 0.14+0.05t, 0.05+0.03t), t = i/(count-1);
-                    1 px (0.38,0.25,0.10,0.85) shoulder where road borders buildable
-entrance/exit:      green arrow (0.35,1.00,0.45) at path.pts[0] along pts[1]-pts[0];
-                    red arrow (1.00,0.35,0.30) at last point along last-prev;
-                    triangle apex 6 px, base 3 px back, half-width 4.5 px, black backing
-cursor tiles:       white = tower; green = legal+affordable; yellow = legal, no gold;
-                    dim = illegal (entrance/exit or would seal the road)
-HUD (top 400x38):   coin(14,19,6)+gold(26,11,s2); heart(100,19,6)+lives(112,11,s2);
-                    phase tag(160,5,s1); wave(160,17,s2 "%d/%d" clamped);
-                    ALIVE/TOWERS(244,5,s1)+count(244,17,s2); SPEED(330,5,s1)+value(330,17,s2)
-tower icon radius:  round((12 + min(level,10)*0.4) * 15/28) -> 7/8/9 px
-enemy icon radius:  5 normal / 9 elite; health bar 13 x 3 (fill 11 x 2)
-beam:               1 px at a=life/0.15, 3 px at a*0.1
-text:               8x8 font, scale 1 = 8 px, scale 2 = 16 px; (x,y) top-left
-button text:        scale 1 fits 40 chars across 320 px
+cell -> top px:      px = 5 + cellX*15;  py = 38 + cellY*15;  cell 15 px
+range radius:        2.142857*15 = 32.14 -> 32 px
+road:                from g->path (live); fill each path cell with
+                     (0.24+0.10t, 0.14+0.05t, 0.05+0.03t), t = i/(count-1);
+                     1 px (0.40,0.27,0.11,0.90) shoulder where road borders buildable
+entrance/exit:       green arrow (0.35,1.00,0.45) at pts[0]; red (1.00,0.35,0.30) at last;
+                     apex 6 px, base 3 px back, half-width 4.5 px + black backing
+damage colours:      normal (0.92,0.92,0.88) fire (1.00,0.45,0.12) electric (0.25,0.85,1.00)
+                     corrosive (0.55,1.00,0.20) slag (0.78,0.35,1.00) explosive (1.00,0.65,0.10)
+layer colours:       HP (0.95,0.18,0.18) SHIELD (0.28,0.55,1.00) ARMOR (0.95,0.78,0.18)
+enemy rings:         radii 6.5/4.6/2.7 px, 2 px thick, 12 segments, alpha 0.45+0.55*frac,
+                     outside-in, destroyed layers skipped; core dot r2.3 current layer colour
+elite:               gold glow r14 + white ring r7.5 a0.64
+hit flash:           white circle r6.2, alpha <=0.80 decayed by hitFlash
+slag:                purple ring r8.4 pulsing; stun: white-blue circle r6.5 pulsing;
+burn:                up to 5 orange 2x2 motes orbiting
+puddle:              r = 0.7*15 = 10.5 px; fill alpha 0.10+0.18*frac, rim alpha 0.30+0.45*frac
+line beam:           3 px colour a*0.14, 1 px colour a, 1 px white a*0.55 (life 0.15)
+explosion:           ring radius = 1.3*15*(1-life/maxLife), 2 px colour a*0.9 (14 seg)
+                     + inner 1 px white at 0.62x radius a*0.4 (12 seg), life 0.30
+tower glyph radius:  7 / 8 / 9 px by level; level bar 11 px at cell bottom; gold cap at L10
+HUD (top 400x38):    coin(14,19,6)+gold(26,11,s2); heart(100,19,6)+lives(112,11,s2);
+                     phase tag(160,5,s1); wave(160,17,s2 clamped); ALIVE/TOWERS(244,5,s1)+count(244,17,s2);
+                     SPEED(330,5,s1)+value(330,17,s2)
+bottom palette:      96x25 at (6/110/214, 34/62); icon (x+12,y+13) r7; name (x+21,y+4) s1;
+                     coin (x+26,y+19) r2.5; cost (x+31,y+15) s1
+text:                8x8 font, scale 1 = 8 px, scale 2 = 16 px
 ```
 
-## Appendix C — dynamic road reference data
+## Appendix C — dynamic road + layer reference
 
-**Initial road (empty board):** `(0,12) -> (25,12)`, 26 cells, `length = 25.0`, path centres `(i+0.5, 12.5)`.
+**Initial road (empty board):** `(0,12) -> (25,12)`, 26 cells, length 25.0, centres `(i+0.5,12.5)`.
 
-**Test fixtures:**
-- One tower at `(7,12)` -> path length **27**; detour through row 11 (test also accepts row 13; BFS neighbour order picks row 11 first).
-- Fence: tower at `(24,12)` legal; then `(25,11)` refused ("would block the path") because the exit would have no free neighbour; selling `(24,12)` reopens it.
-- Example maze (28 towers, path length **35**) — see the §11.4B grid.
+**Road fixtures (test-verified):** one tower at `(7,12)` -> length 27 (row-11 detour); scripted walls at cols 4/8/12/16 with alternating row gaps (48 towers) -> length > 60; every build/sell re-projects live enemies without teleports.
 
-**BFS algorithm/order (must match Lua for deterministic detours):** FIFO from exactly `(0,12)` to `(25,12)`; neighbours expanded **up, down, left, right**; walls = occupied cells (+ hypothetical block); visited at enqueue; parent walk from goal back to start; path written start -> goal.
+**Layer fixtures:** wave 1/3 -> 1 layer, wave 4/8 -> 2 layers, wave 9 -> 3; wave 5 = 12 two-layer regulars + 1 three-layer elite (total max HP 54 and 135 respectively); wave 10 -> 23 three-layer enemies (3 elites). `game_wave_preview` totals for waves 1/4/5/9/10/25 = 5/22/27/63/69/159 layers; 3-layer waves split evenly (spawns each per type).
 
-## Appendix D — Lua reference index
+**BFS order (must match for deterministic detours):** FIFO from `(0,12)` to `(25,12)`; neighbours up, down, left, right; walls = occupied cells; visited at enqueue; parent walk from goal back to start.
+
+## Appendix D — LÖVE reference index (combat model does not come from here)
 
 | Topic | `main.lua` lines |
 |---|---|
 | Window config / screen constants / grid + offsets | 11-52 |
 | Pathfinding (BFS, updatePath) | 54-123 |
-| Tower types / enemy types / damage matrix | 125-179 |
+| Old three-element tower/enemy tables + damage matrix (superseded by v0.3) | 125-179 |
 | Global state variables | 181-226 |
 | Sounds + helpers | 228-287 |
-| Pixel-art icon functions | 289-435 |
+| Pixel-art icon functions (fire/water/leaf shapes reused for FIRE/CORROSIVE bases) | 289-435 |
 | Helpers (grid pos, distance, path position, isPathCell, error, speed text, getTotalCost) | 445-508 |
 | `startWave` / random enemy type | 510-576 |
 | Menu particles | 578-615 |
