@@ -110,12 +110,21 @@ void gfx_target(Screen screen)
         return;
 
     s_screen = screen;
-    C3D_FrameDrawOn(s_targets[screen]);
+    /* Important: do NOT call C3D_FrameDrawOn() before C2D_SceneBegin().  Begin
+     * flushes the previous screen's pending vertex batch, and that flush has to
+     * land on the target the vertices were drawn for.  Switching the render
+     * target first sent the tail of the top screen's batch into the bottom
+     * screen instead - which is why the top-screen menu used to lose the
+     * forest glyph and the "press A" prompt. */
     C2D_SceneBegin(s_targets[screen]);
 }
 
 void gfx_present(void)
 {
+    /* Flush the last screen's pending batch before ending the frame; citro2d
+     * only recycles its vertex buffer at frame end, so anything still queued
+     * here would be submitted against the wrong target. */
+    C2D_Flush();
     C3D_FrameEnd(0);
 }
 
