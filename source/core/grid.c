@@ -272,7 +272,7 @@ int game_tower_at(const Game *g, int col, int row)
     if (!g || col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) {
         return -1;
     }
-    slot = (int)(unsigned char)g->occupancy[row][col];
+    slot = (int)g->occupancy[row][col];
     return (slot > 0) ? slot - 1 : -1;
 }
 
@@ -283,10 +283,13 @@ static bool is_entrance_or_exit(int col, int row)
 }
 
 /*
- * Placement legality only: bounds, entrance/exit, occupancy, tower cap and the
- * maze rule (a build may never seal the exit). It does NOT look at gold, so the
- * UI can distinguish "nothing can go here" (red tile) from "not affordable"
- * (message on tap). game_place_tower() checks gold.
+ * Placement legality only: bounds, entrance/exit, occupancy and the maze rule
+ * (a build may never seal the exit). It does NOT look at gold, so the UI can
+ * distinguish "nothing can go here" (red tile) from "not affordable" (message on
+ * tap). game_place_tower() checks gold.
+ *
+ * There is deliberately no tower-count test: the board has only 338 cells (336
+ * buildable), which is below MAX_TOWERS, so the board itself is the only limit.
  *
  * The reachability test runs a BFS with the candidate cell treated as a wall;
  * the real board is not touched, so this is safe to call for the cursor every
@@ -310,9 +313,6 @@ bool game_can_place_at(const Game *g, int col, int row, int type)
         return false;
     }
     if (g->occupancy[row][col] != 0) {
-        return false;
-    }
-    if (g->towerCount >= MAX_TOWERS) {
         return false;
     }
     return core_path_exists(g, col, row);

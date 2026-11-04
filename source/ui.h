@@ -10,16 +10,19 @@
  * precise buttons without duplicating the layout.
  *
  * Screen layouts (320x240):
- *   PHASE_MENU : title, three tower icons, big START button
- *   BUILD/WAVE : 32 px header (gold | lives | wave | speed badge | pause badge)
- *                2 x 3 tower palette (96x25 buttons), 66 px info/upgrade panel,
- *                77 px NEXT WAVE + HP/SHIELD/ARMOR/elite preview (build)
- *                or wave progress + stats                          (wave)
- *   paused     : dimmed play UI + RESUME / MAIN MENU
- *   result     : PLAY AGAIN / MAIN MENU
+ *   PHASE_MENU : comic title, five rounded element cards, big START button,
+ *                waving mascot
+ *   BUILD/WAVE : 28 px stat chip row (gold | lives | WAVE x/1000 | towers |
+ *                speed | pause), 2x3 rounded tower palette, 56 px selected /
+ *                cursor panel with UPGRADE + SELL, and a 76 px bottom row:
+ *                NEXT WAVE + INCOMING bracket (build) or rounded wave progress
+ *                + stats (wave).  A tiny mascot blob bounces in the corner.
+ *   paused     : dimmed play UI + RESUME / MAIN MENU (worried mascot)
+ *   result     : PLAY AGAIN / MAIN MENU (happy or pale mascot)
  *
- * The header speed/pause badges are the single touch control for those two
- * actions in every play phase; the wave panel shows progress and stats only.
+ * The stat-chip speed and pause pills are the single touch control for those
+ * two actions in every play phase; the bottom row shows progress/stats only.
+ * The top screen is a pure battlefield (no duplicate HUD).
  *
  * Maze building: the info panel labels the cursor cell "ROAD" when it lies on
  * the live BFS path and says whether building there is legal; the core owns

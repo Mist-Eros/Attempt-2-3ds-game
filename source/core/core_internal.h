@@ -23,7 +23,7 @@
 #define CORE_HIT_FLASH_TIME      0.12f          /* enemy white-flash on direct hit */
 
 /* Content constants that the original game hard-coded. */
-#define CORE_TOTAL_WAVES         25             /* original was endless; 25 = boss wave */
+#define CORE_TOTAL_WAVES         1000           /* v0.7: 1000-round campaign */
 #define CORE_KILL_REWARD         10             /* gold per kill, elite or not (main.lua:763) */
 
 /* The maze entrance and exit. Towers may stand on the road everywhere else. */
@@ -51,11 +51,19 @@ extern const float core_slag_damage_amp;      /* x1.5 damage taken */
 extern const float core_slag_speed_mult;      /* x0.65 movement */
 extern const float core_explosion_life;       /* 0.30 s explosion ring visual */
 
-/* Wave composition. All of these are 1-based waves. */
-int   core_wave_base_enemies(int wave);       /* 3 + wave*2, before elites */
+/* Wave composition. All of these are 1-based waves.
+ *
+ * Long-run (v0.7, 1000 waves) shape: spawn count climbs by the original
+ * +2/wave until it saturates at CORE_WAVE_MAX_SPAWNS (~wave 39), the spawn
+ * interval shrinks from 3.0 s to a 0.2 s floor (~wave 56) so late waves are
+ * dense ~16-20 s bursts, and HP keeps its early formula but gains a linear
+ * late-game multiplier after wave 60. Enemy speed uses the original linear
+ * ramp but saturates at CORE_ENEMY_SPEED_MAX_CELLS cells/s before the elite
+ * speed bonus. See data.c for the single tuning block. */
+int   core_wave_base_enemies(int wave);       /* 3 + 2*wave, capped at 80 */
 int   core_wave_elite_count(int wave);        /* 10 on %25, 3 on %10, 1 on %5, else 0 */
 int   core_wave_total_spawns(int wave);       /* wave size including elites */
-float core_wave_spawn_interval(int wave);     /* max(0.8, 3.0 - wave*0.05) */
+float core_wave_spawn_interval(int wave);     /* max(0.20, 3.0 - wave*0.05) */
 float core_enemy_hp(int wave, bool elite);    /* total HP over all layers */
 float core_enemy_speed(int wave, bool elite); /* original "speed" units, *1.8 if elite */
 
@@ -64,7 +72,10 @@ float core_enemy_speed(int wave, bool elite); /* original "speed" units, *1.8 if
  * LÖVE original: the original did t += dt*speed/100 with t normalised over the
  * whole path, so a longer (mazed) path did not buy the towers any extra time.
  * Here speed is absolute - every extra cell of detour is extra tower time.
- * SPEED_SCALE (data.c) is the single tuning knob.
+ *
+ * Speed keeps the original 5 cells/s at wave 1 and the old linear ramp, but is
+ * capped at CORE_ENEMY_SPEED_MAX_CELLS (10) cells/s before the elite x1.8
+ * bonus, so wave 1000 cannot teleport past the towers.
  */
 float core_enemy_speed_cells(int wave, bool elite);
 float core_enemy_speed_scale(void);

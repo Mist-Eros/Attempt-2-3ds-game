@@ -38,7 +38,14 @@
 #define MAX_LAYERS 3
 #define MAX_PUDDLES 16
 
-#define MAX_TOWERS 96
+/*
+ * No tower cap: the 26x13 board has 338 cells (336 buildable - the entrance and
+ * exit are reserved), so 400 is a pure storage bound the player can never hit.
+ * The compile-time check below keeps MAX_TOWERS strictly above the board size.
+ */
+#define MAX_TOWERS 400
+typedef char game_max_towers_exceeds_board[
+    (MAX_TOWERS > GRID_ROWS * GRID_COLS) ? 1 : -1];
 #define MAX_ENEMIES 128
 #define MAX_BEAMS 128
 #define MAX_ELITE_SPAWNS 16
@@ -166,7 +173,11 @@ typedef struct {
     /* board */
     Tower towers[MAX_TOWERS];
     int towerCount;
-    int8_t occupancy[GRID_ROWS][GRID_COLS];  /* 0 = empty, else tower index + 1 */
+    /*
+     * 0 = empty, else tower index + 1. int16_t because the board can hold more
+     * than 127 towers (the old int8_t would wrap and corrupt the maze BFS).
+     */
+    int16_t occupancy[GRID_ROWS][GRID_COLS];
     Path path;
     bool pathBlocked;       /* defensive only: live board has no route; placement
                              * rejections are pre-checked in game_can_place_at() */

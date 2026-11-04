@@ -714,6 +714,154 @@ static void scenario_victory(Driver *d)
 }
 
 /* ------------------------------------------------------------------ */
+/* v0.7 late-game UI stress test (1000-wave campaign, no tower cap)   */
+/* ------------------------------------------------------------------ */
+
+/* Fill every non-road cell with a late-game tower so the HUD's tower counter
+ * reaches 3 digits (the straight road leaves 312 buildable cells).  This is a
+ * hand-built UI fixture, not a played run - the harness writes Game state
+ * directly, exactly like the gameover/victory scenarios force their phases. */
+static int late_fill_board(Game *g)
+{
+    int8_t isPath[GRID_ROWS][GRID_COLS];
+    int col, row, n = 0;
+    int i;
+
+    memset(isPath, 0, sizeof isPath);
+    for (i = 0; i < g->path.count; i++) {
+        int pc = (int)g->path.pts[i].x;   /* cell centres are (col+0.5) */
+        int pr = (int)g->path.pts[i].y;
+        if (pc >= 0 && pc < GRID_COLS && pr >= 0 && pr < GRID_ROWS)
+            isPath[pr][pc] = 1;
+    }
+
+    memset(g->occupancy, 0, sizeof g->occupancy);
+    for (row = 0; row < GRID_ROWS; row++) {
+        for (col = 0; col < GRID_COLS; col++) {
+            Tower *t;
+            if (isPath[row][col] || n >= MAX_TOWERS)
+                continue;
+            t = &g->towers[n];
+            memset(t, 0, sizeof *t);
+            t->active = true;
+            t->damageType = (uint8_t)(n % TOWER_TYPE_COUNT);
+            t->level = (uint8_t)(1 + (n * 7) % TOWER_MAX_LEVEL);
+            if (n == 0)
+                t->level = (uint8_t)(TOWER_MAX_LEVEL - 1);  /* LV.9: expensive upgrade label */
+            t->col = (int16_t)col;
+            t->row = (int16_t)row;
+            t->cooldown = (float)(n % 10) * 0.08f;
+            t->invested = 20 * (1 << (n % 5));
+            t->animPhase = (float)(n % 17) * 0.37f;
+            g->occupancy[row][col] = (int16_t)(n + 1);
+            ++n;
+        }
+    }
+    g->towerCount = n;
+    return n;
+}
+
+/* Late-game fixture: four captures that exercise the widest HUD values.
+ * The real 1000-wave sim ends around 253,060 gold, so the gold chip is tested
+ * with realistic 6-digit balances (engine-3ds abbreviates them); the cursor
+ * tower is LV.9 so the panel shows its most expensive UPGRADE label.
+ *   1) BUILD at wave 900/1000, gold 172,360 - mid-late reference value.
+ *   2) BUILD at wave 1000/1000, gold 253,060 - end-of-campaign balance,
+ *      3-digit TOWERS chip, NEXT WAVE "WAVE 1000 OF 1000", the full INCOMING
+ *      preview (game_wave_preview at wave 1000: 80 spawns / 10 elites) and the
+ *      LV.9 -> LV.10 upgrade cost label.
+ *   3) WAVE at wave 1000/1000, fast-forwarded to a mid-wave state so the
+ *      progress bar, LEFT/ALIVE/QUEUED/KILLS counters and the wide wave title
+ *      are all on screen at once.
+ *   4) VICTORY with internal wave=1001 but totalWaves=1000: both screens must
+ *      clamp the displayed text to 1000/1000. */
+static void scenario_late(Driver *d)
+{
+    Game *g = &d->app.game;
+    int hpLayers = 0, shieldLayers = 0, armorLayers = 0, elites = 0;
+    int towers, upgradeCost;
+    int i;
+
+    start_run_from_menu(d);
+    idle(d, 2);
+
+    towers = late_fill_board(g);
+
+    /* ---- (1) BUILD at wave 900/1000, gold 172,360 ------------------- */
+    g->phase = PHASE_BUILD;
+    g->wave = 900;
+    g->totalWaves = 1000;
+    g->gold = 172360;
+    g->lives = 20;
+    g->kills = 48000;
+    g->leaks = 4;
+    g->timeTotal = 20123.4f;
+    g->speedMultiplier = 1.0f;
+    g->enemiesAlive = 0;
+    g->enemiesToSpawn = 0;
+    g->selectedTower = -1;
+    g->cursorCol = 0;
+    g->cursorRow = 0;
+    game_wave_preview(g, &hpLayers, &shieldLayers, &armorLayers, &elites);
+    upgradeCost = game_upgrade_cost(g, 0);
+    printf("[late] BUILD wave=%d/%d towers=%d gold=%d; INCOMING hp=%d "
+           "shield=%d armor=%d elites=%d; selected GUN LV.%d upgrade %dG\n",
+           g->wave, g->totalWaves, towers, g->gold, hpLayers, shieldLayers,
+           armorLayers, elites, (int)g->towers[0].level, upgradeCost);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* late-1: BUILD @ 900/1000, gold 172K */
+
+    /* ---- (2) BUILD at wave 1000/1000, real end-of-run gold 253,060 -- */
+    g->wave = 1000;
+    g->gold = 253060;
+    g->kills = 52000;
+    g->leaks = 5;
+    g->timeTotal = 23456.7f;
+    game_wave_preview(g, &hpLayers, &shieldLayers, &armorLayers, &elites);
+    printf("[late] BUILD wave=%d/%d towers=%d gold=%d; INCOMING hp=%d "
+           "shield=%d armor=%d elites=%d\n",
+           g->wave, g->totalWaves, towers, g->gold, hpLayers, shieldLayers,
+           armorLayers, elites);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* late-2: BUILD @ 1000/1000, gold 253K */
+
+    /* ---- (3) WAVE at wave 1000/1000, mid-progress ------------------- */
+    g->lives = 999;                     /* fixture: keep the demo alive... */
+    game_start_next_wave(g);
+    for (i = 0; i < 480 && d->frame < d->max_frames; i++) {
+        if (g->phase != PHASE_WAVE)
+            break;
+        run_frame(d, NULL, false);
+    }
+    g->lives = 16;                      /* ...then show realistic values */
+    g->leaks = 5;
+    g->gold = 253060;
+    printf("[late] WAVE wave=%d/%d alive=%d queued=%d kills=%d leaks=%d "
+           "progress_total=%d\n",
+           g->wave, g->totalWaves, g->enemiesAlive, g->enemiesToSpawn,
+           g->kills, g->leaks, d->app.waveEnemyTotal);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* late-3: WAVE @ 1000/1000 */
+
+    /* ---- (4) VICTORY at wave 1000 (internal wave 1001) ------------- */
+    g->phase = PHASE_VICTORY;
+    g->wave = 1001;                     /* one past the end -> must clamp */
+    g->totalWaves = 1000;
+    g->kills = 52000;
+    g->leaks = 5;
+    g->timeTotal = 23456.7f;
+    g->gold = 253060;
+    g->lives = 16;
+    g->enemiesAlive = 0;
+    g->enemiesToSpawn = 0;
+    printf("[late] VICTORY internal wave=%d totalWaves=%d gold=%d "
+           "(expect clamp to %d/%d)\n",
+           g->wave, g->totalWaves, g->gold, g->totalWaves, g->totalWaves);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* late-4: VICTORY @ 1000/1000 */
+}
+
+/* ------------------------------------------------------------------ */
 /* scenario dispatch                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -732,7 +880,8 @@ static const ScenarioEntry kScenarios[] = {
     { "status",   scenario_status   },
     { "selected", scenario_selected },
     { "gameover", scenario_gameover },
-    { "victory",  scenario_victory  }
+    { "victory",  scenario_victory  },
+    { "late",     scenario_late     }
 };
 
 #define SCENARIO_COUNT ((int)(sizeof kScenarios / sizeof kScenarios[0]))
@@ -810,7 +959,7 @@ static void usage(const char *argv0)
            "Usage: %s [options]\n"
            "\n"
            "  --scenario NAME   menu | build | maze | wave | status | selected |\n"
-           "                    gameover | victory | all  (default: all)\n"
+           "                    gameover | victory | late | all (default: all)\n"
            "  --frames N        frame cap per scenario        (default: %d)\n"
            "  --capture-every K also capture every K-th frame (default: 0 = off)\n"
            "  --out DIR         screenshot directory          (default: out)\n"

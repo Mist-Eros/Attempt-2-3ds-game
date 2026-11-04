@@ -2,7 +2,8 @@
 
 A tower defense game I originally wrote in LÖVE2D, rebuilt from scratch in C so it actually runs
 properly on a Nintendo 3DS — with a Borderlands-style layered damage model, a BL2-inspired title
-screen full of element weapon cards, and streaming music with sound effects.
+screen full of element weapon cards, streaming music with sound effects, and now a **1000-round
+campaign with no tower limit** and a single-screen, cuter touch UI (with a mascot).
 
 The first attempt ran the LÖVE version through LovePotion. It booted! And then crawled at a few
 frames per second with half the playfield off-screen and touch controls fighting LÖVE's mouse
@@ -43,10 +44,19 @@ the others, and does something else on top:
 Strong multipliers are ×2, weak multipliers ×0.5; normal and explosive are ×1 against every layer.
 Waves 1–3 have single-ring creeps, waves 4–8 have two rings, waves 9+ have all three; elites get an
 extra ring. Towers upgrade ten levels (damage doubles each level), you have 20 lives, elites show up
-every 5th wave, and clearing 25 waves wins.
+every 5th wave, and at high waves they come as dense bursts (up to 80 spawns, 10 elites, capped speed).
 
-Top screen is the battlefield, bottom screen is the touch panel. The game is paused between waves so
-you can build as long as you like before calling the next one in.
+**There is no tower limit.** Build as many towers as the board and your gold allow — every cell that
+isn't occupied by another tower, the entrance or the exit is fair game, and the maze re-routes creeps
+around whatever you place. **The campaign is 1000 rounds**; clear all of them for the win. It's a
+marathon: roughly 5½ hours at 1× speed (about 1½ hours with the 4× speed toggle), with late waves
+leaking through unless your maze and upgrades are on point.
+
+Top screen is **only the battlefield** — no HUD band, no duplicated numbers. Everything persistent
+lives on the bottom touch screen: stat chips (gold, lives, wave x/1000, towers, speed, pause), the
+six-tower palette, upgrade/sell, the wave panel, and a reactive little mascot slime that celebrates
+builds and worries about leaks. A one-shot **WAVE N INCOMING** banner slides across the battlefield
+when you call a wave. The game is paused between waves so you can build as long as you like.
 
 ## Screenshots
 
@@ -54,9 +64,15 @@ Rendered by the game's own frame code (top screen above, touchscreen below) — 
 harness runs the same `game.h`/`gfx.h` rendering the 3DS backend uses, so this is exactly what the
 console draws:
 
-| Menu: element weapon cards | Build phase: six damage types | Wave: layered creeps |
+| Menu: element weapon cards | Build phase: battlefield only on top, full UI below | Wave incoming |
 |---|---|---|
-| ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![combat](docs/screenshots/wave.png) |
+| ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![wave incoming](docs/screenshots/wave.png) |
+
+Late game (round 1000/1000, 336 towers) and the win screen:
+
+| Late-game HUD at 1250 gold / 336 towers | Victory, clamped at 1000/1000 |
+|---|---|
+| ![late game](docs/screenshots/late_game.png) | ![victory](docs/screenshots/victory.png) |
 
 Close-ups of the damage model (layered rings, burn stacks, acid puddle, explosive blast):
 
@@ -79,6 +95,7 @@ point that can run `.3dsx` files).
 | L / R | cycle the six damage types |
 | Start | pause |
 | Select | change game speed (1x / 2x / 4x) |
+| Touchscreen chips | pause, speed, tower selection, upgrade/sell, next wave |
 
 Tapping a placed tower with your finger on the bottom screen isn't a thing yet (the battlefield is on
 the top screen, which isn't touch) — the D-pad cursor is how you select one, or the panel shows the
@@ -106,16 +123,21 @@ sound is a real-hardware thing.)
 
 ## Status
 
-Playable end to end: maze building on the road, 25 waves, six damage types against layered enemies,
-status effects, upgrades, lives, game over, victory, streaming music + sfx, and a custom Homebrew
-Launcher icon. The title screen is an element-card rack (five BL2-style cards with the emblems and
-their matchups), and the in-game panels use the same chamfered gold/hazard-stripe language. It boots at
-a stable 60 fps in the Azahar emulator, which is where most of my testing happened — real-hardware
-input and GPU output are the next thing to keep an eye on. What's still missing:
+Playable end to end: maze building on the road, **1000 rounds**, **no tower cap** (up to 336 towers on
+the board, occupancy indexed for the whole board), six damage types against layered enemies, status
+effects, upgrades, lives, game over, victory, streaming music + sfx, and a custom Homebrew Launcher
+icon. v0.7 removed the duplicated top HUD (top screen is a pure battlefield in a chunky comic frame),
+redesigned the bottom screen as rounded pastel stat chips + palette + selected panel + INCOMING panel,
+and added the mascot slime plus the one-shot wave banner. The late-game HUD is verified to fit
+1000/1000 waves, 4-digit gold and 336 towers. It boots at a stable 60 fps in the Azahar emulator, which
+is where most of my testing happened — real-hardware input and GPU output are the next thing to keep
+an eye on. What's still missing:
 
 - [ ] real-hardware playtest tuning — the balance only exists in the sim so far
 - [ ] real-hardware audio pass — the streaming backend was only verified by building/linking so far
-- [ ] general polish: another pass on the in-game panels, and the bottom panel starts to feel cramped at 320px
+- [ ] real-hardware playtest of the 1000-round pacing (the 5½ h 1× run especially)
+- [ ] optional endless mode past round 1000 / wave-set variety
+- [ ] more mascot moods and a settings page for it
 
 ## Building it
 
@@ -149,7 +171,7 @@ source/main.c    aptMainLoop / hid polling / frame timing
 source/audio_3ds.c  libctru ndsp mixer + Tremor streaming music for the 3DS build
 source/audio.c   portable no-op fallback so the PC preview harness links without audio
 data/            PCM16 sfx + the two OGG tracks, linked into the binary via bin2o
-tests/           the core's unit tests (46 of them), built and run on the host
+tests/           the core's unit tests (48 of them), built and run on the host
 tools/sim.c      headless auto-play balance sim (mixed army, maze AI, GUN-only control)
 tools/preview/   a tiny PC software renderer that dumps PNG frames - my "emulator"
 tools/make_audio.py / make_icon.py   regenerate data/ and the launcher icon
@@ -167,7 +189,8 @@ multipliers, status-effect rules) and the full port/implementation spec is
 Run the tests:
 
 ```sh
-make -C tests CC=cc test     # any C compiler
+make -C tests CC=cc test     # 48 tests, any C compiler
+make -C tools CC=cc run      # headless 1000-wave campaign sim (~1.2 s CPU)
 ```
 
 ## Why rewrite instead of fixing the Lua one

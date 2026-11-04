@@ -104,6 +104,19 @@ typedef struct {
     int waveTrackedWave;    /* wave number waveEnemyTotal belongs to */
     int waveEnemyTotal;     /* peak alive+queued enemies for that wave  */
 
+    /* Cute mascot reactivity: app_tick edge-detects events and ui.c animates
+     * the little blob from these timers (and from lives for the pale mood). */
+    float mascotHappy;      /* seconds left of the happy hop            */
+    float mascotWorried;    /* seconds left of the worried wobble      */
+    int mascotTowers;       /* last tower count seen (placement edges) */
+    int mascotLeaks;        /* last leak count seen                    */
+    int mascotLives;        /* last lives count seen                   */
+
+    /* Transient top-screen flourish: "WAVE N INCOMING" for 1.5 s at the start
+     * of each wave, then gone (no persistent top-screen stats). */
+    float waveBannerTimer;  /* > 0 while the banner is on screen       */
+    int waveBannerWave;     /* wave number the banner belongs to       */
+
     /* Last Game.phase the music track was set for (-1 = not set yet), so
      * app_tick only calls audio_set_music() on actual transitions. */
     int lastMusicPhase;

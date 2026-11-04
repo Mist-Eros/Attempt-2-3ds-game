@@ -847,80 +847,70 @@ static void build_path_map(const Game *g, int16_t map[GRID_ROWS][GRID_COLS])
     }
 }
 
-static void draw_hud(const App *app)
+/* Chunky comic frame around the board.  With the old HUD strip gone the board
+ * is centred, and this frame is the only permanent decoration on the top
+ * screen: no persistent numbers, no duplication with the bottom screen. */
+static void draw_board_frame(void)
+{
+    const float x = BOARD_X - 4.0f;
+    const float y = BOARD_Y - 4.0f;
+    const float w = BOARD_W + 8.0f;
+    const float h = BOARD_H + 8.0f;
+
+    art_panel(x, y, w, h, 8.0f, COL_GOLD, true);
+}
+
+/* One-shot "WAVE N INCOMING" banner.  Shown for 1.5 s when a wave starts,
+ * then gone: the battlefield stays clean while the actual wave runs. */
+static void draw_wave_banner(const App *app)
 {
     const Game *g = &app->game;
     char buf[32];
-    const char *phaseTag;
-    GfxColor phaseColor;
-    int shownWave = g->wave > g->totalWaves ? g->totalWaves : g->wave;
+    float t;
+    float ease;
+    float alpha;
+    float y;
+    float pulse;
 
-    /* BL2-style HUD band: near-black body, gold trim along the bottom edge and
-     * small hazard ticks in the gaps between the stat groups. */
-    gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, HUD_H, rgba(0.04f, 0.04f, 0.075f, 1.0f));
-    art_hazard_strip(92.0f, 10.0f, 6.0f, 11.0f);
-    art_hazard_strip(148.0f, 10.0f, 6.0f, 11.0f);
-    art_hazard_strip(306.0f, 10.0f, 6.0f, 11.0f);
+    if (app->waveBannerTimer <= 0.0f || g->phase != PHASE_WAVE)
+        return;
 
-    /* gold */
-    art_coin(14.0f, 19.0f, 6.0f);
-    snprintf(buf, sizeof(buf), "%d", g->gold);
-    gfx_text(26.0f, 11.0f, 2.0f, COL_GOLD, buf);
+    t = 1.0f - app->waveBannerTimer / 1.5f;
+    if (t < 0.0f)
+        t = 0.0f;
+    if (t > 1.0f)
+        t = 1.0f;
+    ease = 1.0f - (1.0f - t) * (1.0f - t);
+    y = 34.0f + (1.0f - ease) * 24.0f;
+    alpha = t < 0.06f ? t / 0.06f : (t > 0.86f ? (1.0f - t) / 0.14f : 1.0f);
+    if (alpha < 0.0f)
+        alpha = 0.0f;
+    if (alpha > 1.0f)
+        alpha = 1.0f;
+    pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(app->time * 9.0f));
 
-    /* lives */
-    art_heart(100.0f, 19.0f, 6.0f, COL_RED);
-    snprintf(buf, sizeof(buf), "%d", g->lives);
-    gfx_text(112.0f, 11.0f, 2.0f, COL_WHITE, buf);
+    gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, (float)TOP_H,
+                  rgba(0.02f, 0.02f, 0.05f, 0.18f * alpha));
 
-    /* phase tag + wave counter: the only status the playfield needs, kept in
-     * the HUD strip so the board itself is never covered. */
-    if (g->paused) {
-        phaseTag = "PAUSED";
-        phaseColor = rgba(0.80f, 0.80f, 0.85f, 1.0f);
-    } else if (g->phase == PHASE_WAVE) {
-        phaseTag = "WAVE";
-        phaseColor = COL_WAVE_TAG;
-    } else if (g->phase == PHASE_GAMEOVER) {
-        phaseTag = "OVER";
-        phaseColor = COL_RED;
-    } else if (g->phase == PHASE_VICTORY) {
-        phaseTag = "WIN";
-        phaseColor = COL_GOLD;
-    } else {
-        phaseTag = "BUILD";
-        phaseColor = COL_BUILD_TAG;
-    }
-    gfx_text(160.0f, 5.0f, 1.0f, phaseColor, phaseTag);
-    snprintf(buf, sizeof(buf), "%d/%d", shownWave, g->totalWaves);
-    gfx_text(160.0f, 17.0f, 2.0f, COL_WHITE, buf);
+    art_panel(72.0f, y, 256.0f, 62.0f, 9.0f,
+              rgba(1.00f, 0.82f, 0.24f, alpha), true);
+    art_hazard_strip(82.0f, y + 7.0f, 12.0f, 5.0f);
+    art_hazard_strip(306.0f, y + 7.0f, 12.0f, 5.0f);
 
-    /* alive / tower count */
-    if (g->phase == PHASE_WAVE) {
-        gfx_text(244.0f, 5.0f, 1.0f, COL_MUTED, "ALIVE");
-        snprintf(buf, sizeof(buf), "%d", g->enemiesAlive);
-        gfx_text(244.0f, 17.0f, 2.0f, COL_WHITE, buf);
-    } else {
-        gfx_text(244.0f, 5.0f, 1.0f, COL_MUTED, "TOWERS");
-        snprintf(buf, sizeof(buf), "%d", g->towerCount);
-        gfx_text(244.0f, 17.0f, 2.0f, COL_WHITE, buf);
-    }
+    snprintf(buf, sizeof(buf), "WAVE %d", g->wave);
+    text_comic_centered(200.0f, y + 12.0f, 2.0f,
+                        rgba(1.0f, 0.95f, 0.82f, alpha), buf);
+    text_centered(200.0f, y + 40.0f, 1.0f,
+                  rgba(1.0f, 0.72f, 0.42f, alpha * pulse), "INCOMING");
 
-    /* speed */
-    gfx_text(330.0f, 5.0f, 1.0f, COL_MUTED, "SPEED");
-    snprintf(buf, sizeof(buf), "%.0fX", (double)g->speedMultiplier);
-    gfx_text(330.0f, 17.0f, 2.0f, g->speedMultiplier > 1.0f ? COL_YELLOW : COL_WHITE,
-             buf);
+    /* little chevrons flanking the banner */
+    gfx_fill_triangle(90.0f, y + 30.0f, 104.0f, y + 24.0f,
+                      104.0f, y + 36.0f,
+                      rgba(1.0f, 0.82f, 0.30f, 0.85f * alpha));
+    gfx_fill_triangle(310.0f, y + 30.0f, 296.0f, y + 24.0f,
+                      296.0f, y + 36.0f,
+                      rgba(1.0f, 0.82f, 0.30f, 0.85f * alpha));
 }
-
-/* Gold trim between the HUD strip and the board.  Drawn after the board so the
- * board backing lip cannot cover it. */
-static void draw_hud_trim(void)
-{
-    gfx_fill_rect(0.0f, HUD_H - 4.0f, (float)TOP_W, 1.0f,
-                  rgba(0.12f, 0.10f, 0.06f, 0.95f));
-    gfx_fill_rect(0.0f, HUD_H - 2.0f, (float)TOP_W, 2.0f, COL_GOLD);
-}
-
 static void draw_board(const App *app, const int16_t pathMap[GRID_ROWS][GRID_COLS])
 {
     const Game *g = &app->game;
@@ -1428,9 +1418,8 @@ void render_game_top(const App *app)
 
     build_path_map(g, pathMap);
 
-    draw_hud(app);
+    draw_board_frame();
     draw_board(app, pathMap);
-    draw_hud_trim();
     draw_puddles(app);          /* ground decals: under towers and enemies */
     draw_portal_markers(g);
     draw_range_previews(app);
@@ -1438,6 +1427,7 @@ void render_game_top(const App *app)
     draw_beams(app);
     draw_enemies(app);
     draw_cursor(app);
+    draw_wave_banner(app);      /* transient: 1.5 s at wave start only */
 }
 
 /* ------------------------------------------------------------------------ */

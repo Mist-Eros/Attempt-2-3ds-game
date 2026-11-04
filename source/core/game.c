@@ -87,7 +87,8 @@ static void rebuild_occupancy(Game *g)
     memset(g->occupancy, 0, sizeof g->occupancy);
     for (i = 0; i < g->towerCount; ++i) {
         if (g->towers[i].active) {
-            g->occupancy[g->towers[i].row][g->towers[i].col] = (int8_t)(i + 1);
+            g->occupancy[g->towers[i].row][g->towers[i].col] =
+                (int16_t)(i + 1);
         }
     }
 }
@@ -971,9 +972,11 @@ void game_step(Game *g, float dt)
  * every empty cell except the entrance and the exit is fair game - but a build
  * that would make the exit unreachable is refused and costs nothing.
  *
- * Messages (front end may show g->message): "can't build now", "can't build
- * there", "can't build on the entrance", "can't build on the exit", "cell
- * occupied", "tower limit", "that would block the path", "not enough gold".
+ * There is NO tower cap: the 26x13 board is the only limit (MAX_TOWERS is just
+ * the storage bound and is larger than the board). Failure messages (front end
+ * may show g->message): "can't build now", "can't build there", "can't build on
+ * the entrance", "can't build on the exit", "cell occupied", "that would block
+ * the path", "not enough gold".
  */
 bool game_place_tower(Game *g, int col, int row)
 {
@@ -1014,10 +1017,8 @@ bool game_place_tower(Game *g, int col, int row)
         set_message(g, "cell occupied");
         return false;
     }
-    if (g->towerCount >= MAX_TOWERS) {
-        set_message(g, "tower limit");
-        return false;
-    }
+    /* No tower-count check: the board itself is the limit (MAX_TOWERS is a
+     * compile-time-checked storage bound larger than GRID_ROWS*GRID_COLS). */
     /* Maze rule: refuse a build that would cut the exit off. This only runs the
      * BFS on a hypothetical board, nothing is mutated yet. */
     if (!core_path_exists(g, col, row)) {
@@ -1042,7 +1043,7 @@ bool game_place_tower(Game *g, int col, int row)
     tower->animPhase = 0.0f;
 
     ++g->towerCount;
-    g->occupancy[row][col] = (int8_t)(index + 1);
+    g->occupancy[row][col] = (int16_t)(index + 1);
     g->gold -= spec->cost;
     g->selectedTower = index;
 
@@ -1123,8 +1124,8 @@ bool game_sell_selected(Game *g)
     refund = game_sell_value(g, index);
     g->gold += refund;
 
-    /* Compact the tower array and rebuild the grid indices. MAX_TOWERS is 96
-     * so the memmove-ish shift is trivial. */
+    /* Compact the tower array and rebuild the grid indices. The board holds at
+     * most 336 towers, so this shift is always small. */
     for (i = index; i < g->towerCount - 1; ++i) {
         g->towers[i] = g->towers[i + 1];
     }

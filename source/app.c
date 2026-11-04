@@ -116,6 +116,15 @@ void app_new_run(App *app, uint32_t seed)
     app->menuTime = 0.0f;
     app->waveTrackedWave = app->game.wave;
     app->waveEnemyTotal = 0;
+
+    /* fresh mascot/banner state for the new run */
+    app->mascotHappy = 0.0f;
+    app->mascotWorried = 0.0f;
+    app->mascotTowers = app->game.towerCount;
+    app->mascotLeaks = app->game.leaks;
+    app->mascotLives = app->game.lives;
+    app->waveBannerTimer = 0.0f;
+    app->waveBannerWave = app->game.wave;
 }
 
 bool app_is_paused(const App *app)
@@ -400,6 +409,11 @@ void app_init(App *app)
     app->seed = 0x5EED1234u;
     app->particleRng = 0x1BADB002u;
     app->lastMusicPhase = -1;
+    app->mascotTowers = app->game.towerCount;
+    app->mascotLeaks = app->game.leaks;
+    app->mascotLives = app->game.lives;
+    app->waveBannerTimer = 0.0f;
+    app->waveBannerWave = app->game.wave;
 
     for (i = 0; i < MENU_PARTICLE_COUNT; i++)
         particle_spawn(app, &app->particles[i], true);
@@ -461,6 +475,45 @@ void app_tick(App *app, const Input *input, float dt)
         int remaining = g->enemiesAlive + g->enemiesToSpawn;
         if (remaining > app->waveEnemyTotal)
             app->waveEnemyTotal = remaining;
+    }
+
+    /* Cute mascot reactions (edge-detected so ui.c stays a pure renderer). */
+    if (g->towerCount > app->mascotTowers)
+        app->mascotHappy = 1.0f;            /* tower placed / upgraded  */
+    else if (g->towerCount < app->mascotTowers)
+        app->mascotHappy = 0.55f;           /* tower sold               */
+    app->mascotTowers = g->towerCount;
+    if (g->leaks > app->mascotLeaks)
+        app->mascotWorried = 1.30f;         /* a creep got through      */
+    app->mascotLeaks = g->leaks;
+    if (g->lives < app->mascotLives)
+        app->mascotWorried = 1.60f;         /* lives lost               */
+    app->mascotLives = g->lives;
+    if (app->mascotHappy > 0.0f) {
+        app->mascotHappy -= dt;
+        if (app->mascotHappy < 0.0f)
+            app->mascotHappy = 0.0f;
+    }
+    if (app->mascotWorried > 0.0f) {
+        app->mascotWorried -= dt;
+        if (app->mascotWorried < 0.0f)
+            app->mascotWorried = 0.0f;
+    }
+
+    /* One-shot top-screen banner on the BUILD -> WAVE edge. */
+    if (g->phase == PHASE_WAVE && app->lastMusicPhase != (int)PHASE_WAVE) {
+        app->waveBannerTimer = 1.5f;
+        app->waveBannerWave = g->wave;
+    }
+    if (g->phase == PHASE_WAVE) {
+        if (app->waveBannerTimer > 0.0f) {
+            app->waveBannerTimer -= dt;
+            if (app->waveBannerTimer < 0.0f)
+                app->waveBannerTimer = 0.0f;
+        }
+    } else {
+        app->waveBannerTimer = 0.0f;
+        app->waveBannerWave = g->wave;
     }
 
     /* Music track follows the phase.  Only call audio_set_music() when the

@@ -1,5 +1,5 @@
 /*
- * Host unit tests for the portable Elemental Defense core (v0.3 combat model).
+ * Host unit tests for the portable Elemental Defense core (v0.7: 1000 waves, no tower cap).
  *
  * Plain C99, no framework: every test prints PASS/FAIL and the process exits
  * non-zero if anything failed.
@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "game.h"
+#include "core_internal.h" /* wave-scaling accessors; host tests only */
 
 /* ------------------------------------------------------------------ */
 /* tiny test harness                                                  */
@@ -830,17 +831,255 @@ static void test_wave_composition(void)
 
 static void test_spawn_intervals(void)
 {
-    static const int waves[] = { 1, 4, 5, 10, 25, 60 };
-    static const float expected[] = { 2.95f, 2.80f, 2.75f, 2.50f, 1.75f, 0.80f };
+    static const int waves[] = { 1, 4, 5, 10, 25, 44, 55, 56, 60, 1000 };
+    static const float expected[] = {
+        2.95f, 2.80f, 2.75f, 2.50f, 1.75f, 0.80f, 0.25f, 0.20f, 0.20f, 0.20f
+    };
     int i;
 
-    for (i = 0; i < 6; ++i) {
+    for (i = 0; i < 10; ++i) {
         Game g;
         begin(&g, 55u + (uint32_t)i);
         g.wave = waves[i];
         game_start_next_wave(&g);
         CHECK_NEAR(g.spawnInterval, expected[i], 1e-5f);
     }
+}
+
+/*
+ * v0.7 long-run scaling: the wave curve must be bounded, monotonic and finite
+ * all the way to wave 1000 (spawn count cap, spawn-interval floor, late HP ramp,
+ * speed cap) and the wave-1000 preview must be exact.
+ */
+static void test_long_run_scaling(void)
+{
+    int wave;
+
+    CHECK(CORE_TOTAL_WAVES == 1000);
+    CHECK(core_wave_total_spawns(1) == 5);
+    CHECK(core_wave_total_spawns(38) == 79);
+    CHECK(core_wave_total_spawns(39) == 80);
+    CHECK(core_wave_total_spawns(1000) == 80);
+    CHECK(core_spawn_slot_is_elite(0, core_wave_elite_count(1000)) == false);
+    CHECK(core_spawn_slot_is_elite(1, core_wave_elite_count(1000)) == true);
+    CHECK(core_wave_elite_count(1000) == 10); /* boss wave (%25) */
+
+    /* Spawn count: non-decreasing, capped, never above the cap. */
+    for (wave = 1; wave <= 1000; ++wave) {
+        int current = core_wave_total_spawns(wave);
+        CHECK(current > 0);
+        CHECK(current <= 80);
+        if (wave > 1) {
+            CHECK(current >= core_wave_total_spawns(wave - 1));
+        }
+    }
+
+    /* Spawn interval: non-increasing, bounded by [0.20, 2.95]. */
+    for (wave = 1; wave <= 1000; ++wave) {
+        float interval = core_wave_spawn_interval(wave);
+        CHECK(interval >= 0.20f - 1e-6f);
+        CHECK(interval <= 3.0f + 1e-6f);
+        if (wave > 1) {
+            CHECK(interval <= core_wave_spawn_interval(wave - 1) + 1e-6f);
+        }
+    }
+    CHECK_NEAR(core_wave_spawn_interval(1000), 0.20f, 1e-6f);
+
+    /* HP: finite, positive, non-decreasing; elites exactly 2.5x; bounded at the
+     * end of the campaign (< 1e6 keeps every float sum sane on the 3DS). */
+    for (wave = 1; wave <= 1000; ++wave) {
+        float hp = core_enemy_hp(wave, false);
+        float eliteHp = core_enemy_hp(wave, true);
+        CHECK(isfinite(hp));
+        CHECK(hp > 0.0f);
+        CHECK_NEAR(eliteHp, hp * 2.5f, 1e-3f);
+        if (wave > 1) {
+            CHECK(hp >= core_enemy_hp(wave - 1, false) - 1e-4f);
+        }
+    }
+    CHECK_NEAR(core_enemy_hp(1, false), 30.0f, 1e-4f);
+    CHECK_NEAR(core_enemy_hp(60, false), 384.0f, 1e-4f); /* early curve */
+    CHECK(core_enemy_hp(1000, false) > core_enemy_hp(100, false));
+    CHECK(core_enemy_hp(1000, false) < 1000000.0f);
+
+    /* Speed: original wave-1 speed, saturating at 10 cells/s (18 elite). */
+    CHECK_NEAR(core_enemy_speed_cells(1, false), 5.0f, 1e-6f);
+    CHECK_NEAR(core_enemy_speed_cells(2, false), 5.25f, 1e-6f);
+    CHECK_NEAR(core_enemy_speed_cells(21, false), 10.0f, 1e-6f);
+    CHECK_NEAR(core_enemy_speed_cells(1000, false), 10.0f, 1e-6f);
+    CHECK_NEAR(core_enemy_speed_cells(1000, true), 18.0f, 1e-6f);
+    for (wave = 1; wave <= 1000; ++wave) {
+        float speed = core_enemy_speed_cells(wave, false);
+        CHECK(speed > 0.0f && speed <= 10.0f + 1e-6f);
+        CHECK_NEAR(core_enemy_speed_cells(wave, true), speed * 1.8f, 1e-4f);
+    }
+
+    /* Layer composition thresholds are unchanged: wave 1000 is 3-layer. */
+    CHECK(core_enemy_layer_count(1, false) == 1);
+    CHECK(core_enemy_layer_count(1000, false) == 3);
+    CHECK(core_enemy_layer_count(1000, true) == 3);
+
+    /* Wave-1000 preview: 80 spawns, 10 elites, all 3 layers -> 240 layers, one
+     * per type; layer quota fits the uint8_t staging fields. */
+    {
+        Game g;
+        int hp = -1;
+        int shield = -1;
+        int armor = -1;
+        int elites = -1;
+
+        begin(&g, 4242u);
+        g.wave = 1000;
+        game_wave_preview(&g, &hp, &shield, &armor, &elites);
+        CHECK(elites == 10);
+        CHECK(hp == 80);
+        CHECK(shield == 80);
+        CHECK(armor == 80);
+        CHECK(hp + shield + armor == 240);
+        CHECK(hp <= 255 && shield <= 255 && armor <= 255);
+
+        game_start_next_wave(&g);
+        CHECK(g.enemiesToSpawn == 80);
+        CHECK(g.layerQuota[LAYER_HP] == (uint8_t)hp);
+        CHECK(g.layerQuota[LAYER_SHIELD] == (uint8_t)shield);
+        CHECK(g.layerQuota[LAYER_ARMOR] == (uint8_t)armor);
+
+        /* Verify the spawner against the pure composition function slot by slot
+         * (fast spawn: at wave 1000 the fastest elites would leak after ~1.4 s,
+         * so compare the first 12 spawns before any can reach the exit). */
+        {
+            int guard;
+            int spawned;
+            int expectedHp = 0;
+            int expectedSh = 0;
+            int expectedAr = 0;
+            int expectedElites = 0;
+            int slot;
+            Composition c;
+
+            g.spawnInterval = 0.02f;
+            for (guard = 0; guard < 500 && g.enemiesAlive < 12; ++guard) {
+                game_step(&g, 1.0f / 60.0f);
+            }
+            spawned = 80 - g.enemiesToSpawn;
+            CHECK(spawned >= 12);
+            CHECK(g.leaks == 0);
+            for (slot = 0; slot < spawned; ++slot) {
+                uint8_t types[MAX_LAYERS];
+                bool elite = core_spawn_slot_is_elite(
+                    slot, core_wave_elite_count(1000));
+                int count = core_enemy_layer_types(g.rng, 1000, elite, slot,
+                                                   types);
+                int i;
+                if (elite) {
+                    ++expectedElites;
+                }
+                for (i = 0; i < count; ++i) {
+                    if (types[i] == LAYER_HP) ++expectedHp;
+                    if (types[i] == LAYER_SHIELD) ++expectedSh;
+                    if (types[i] == LAYER_ARMOR) ++expectedAr;
+                }
+            }
+            c = count_composition(&g);
+            CHECK(c.enemies == spawned);
+            CHECK(c.elites == expectedElites);
+            CHECK(c.layerTypeTotals[LAYER_HP] == expectedHp);
+            CHECK(c.layerTypeTotals[LAYER_SHIELD] == expectedSh);
+            CHECK(c.layerTypeTotals[LAYER_ARMOR] == expectedAr);
+
+            /* In-game HP follows the wave-1000 formula for both regulars and
+             * the (2.5x) elites. */
+            {
+                int i;
+                for (i = 0; i < MAX_ENEMIES; ++i) {
+                    const Enemy *e = &g.enemies[i];
+                    float expected;
+                    if (!e->active) {
+                        continue;
+                    }
+                    expected = core_enemy_hp(1000, e->elite);
+                    CHECK_NEAR(total_layer_max_hp(e), expected, 1e-2f);
+                }
+            }
+        }
+    }
+
+    /* A wave-1000 enemy really moves at the capped speed (60 steps = 1 s). */
+    {
+        Game g;
+
+        begin(&g, 4243u);
+        g.wave = 1000;
+        game_start_next_wave(&g);
+        g.enemiesToSpawn = 0;
+        g.elitePending = 0;
+        g.eliteDelayCount = 0;
+        put_simple_enemy(&g, 0, 0.0f, LAYER_HP, 100000.0f);
+        g.enemiesAlive = 1;
+        run_steps(&g, 60);
+        CHECK_NEAR(g.enemies[0].pathPos, 10.0f, 0.05f);
+    }
+}
+
+/*
+ * No tower cap: the 26x13 board itself is the limit, and occupancy indices
+ * above 127 (the old int8_t overflow) must work across build / read / sell.
+ */
+static void test_no_tower_cap(void)
+{
+    Game g;
+    int row;
+    int col;
+    int built = 0;
+
+    begin(&g, 606u);
+    g.gold = 1000000;
+
+    /* Fill every cell above the road (rows 0..11 = 26*12 = 312 towers). The
+     * straight row-12 road is untouched, so every one of these is legal. */
+    for (row = 0; row < 12; ++row) {
+        for (col = 0; col < GRID_COLS; ++col) {
+            bool placed = game_place_tower(&g, col, row);
+            CHECK(placed);
+            if (placed) {
+                ++built;
+            }
+            CHECK(!text_contains(g.message, "tower limit"));
+        }
+    }
+    CHECK(built == 312);
+    CHECK(g.towerCount == 312);
+    CHECK(g.towerCount > MAX_TOWERS / 4); /* well past the old 96 cap */
+    check_path_integrity(&g);
+    CHECK_NEAR(game_path_length(&g), 25.0f, 1e-6f);
+
+    /* Occupancy index 313 (old int8_t would wrap to 57) reads back correctly. */
+    CHECK(g.occupancy[11][25] == 312);
+    CHECK(game_tower_at(&g, 25, 11) == 311);
+    CHECK(game_tower_at(&g, 0, 7) == 7 * GRID_COLS); /* row-major order */
+    CHECK(g.towers[311].col == 25 && g.towers[311].row == 11);
+
+    /* The board is full above the road: the only placements left are road
+     * cells, which must be refused by the maze rule (not by a tower cap). */
+    game_clear_message(&g);
+    CHECK(game_place_tower(&g, 5, 12) == false);
+    CHECK(text_contains(g.message, "block"));
+
+    /* Selling a high-index tower compacts the array; the rebuilt occupancy
+     * (int16_t) still points at the right towers, including indices > 127. */
+    CHECK(g.towers[200].col == 18 && g.towers[200].row == 7);
+    game_select_tower(&g, 200);
+    CHECK(game_sell_selected(&g) == true);
+    CHECK(g.towerCount == 311);
+    CHECK(g.occupancy[7][18] == 0); /* tower 200 was (18,7), now empty */
+    CHECK(game_tower_at(&g, 19, 7) == 200); /* old tower 201 moved down */
+    CHECK(g.occupancy[7][19] == 201);
+    check_path_integrity(&g);
+
+    /* ...and the freed cell can be built on again (no hidden cap). */
+    CHECK(game_place_tower(&g, 18, 7) == true);
+    CHECK(g.towerCount == 312);
+    CHECK(game_tower_at(&g, 18, 7) == 311);
 }
 
 static void test_spawn_layer_counts_by_wave(void)
@@ -1469,7 +1708,7 @@ static void test_gameover_freezes_simulation(void)
     CHECK(g.phase == PHASE_GAMEOVER);
 }
 
-static void test_victory_after_25_waves(void)
+static void test_victory_after_1000_waves(void)
 {
     Game g;
     int guard;
@@ -1477,14 +1716,17 @@ static void test_victory_after_25_waves(void)
     int wave;
 
     begin(&g, 2024u);
+    /* No towers: every enemy leaks. 78,556 spawns over 1000 waves must not
+     * kill a run with 100,000 lives, so the only possible ending is VICTORY. */
     g.lives = 100000;
     game_cycle_speed(&g);
     game_cycle_speed(&g);
     CHECK_NEAR(g.speedMultiplier, 4.0f, 1e-6f);
 
-    for (wave = 1; wave <= 25; ++wave) {
-        expectedLeaks += 3 + 2 * wave;
+    for (wave = 1; wave <= 1000; ++wave) {
+        expectedLeaks += core_wave_total_spawns(wave);
     }
+    CHECK(expectedLeaks == 78556);
 
     for (guard = 0; guard < 4000000; ++guard) {
         if (g.phase == PHASE_BUILD) {
@@ -1497,9 +1739,10 @@ static void test_victory_after_25_waves(void)
     }
 
     CHECK(g.phase == PHASE_VICTORY);
-    CHECK(g.wave == 26);
-    CHECK(g.totalWaves == 25);
+    CHECK(g.wave == 1001);
+    CHECK(g.totalWaves == 1000);
     CHECK(g.leaks == expectedLeaks);
+    CHECK(g.kills == 0);
     CHECK((g.events & GAME_EVT_VICTORY) != 0u);
 }
 
@@ -1710,7 +1953,7 @@ static void test_selection_and_cursor(void)
     CHECK(g.selectedTower == -1);
 }
 
-static void test_capacity_limits(void)
+static void test_capacity_pools(void)
 {
     Game g;
     int i;
@@ -1749,13 +1992,14 @@ static void test_capacity_limits(void)
     }
     CHECK(g.enemies[0].layers[0].hp < 100.0f);
 
-    /* Tower array full: placement is rejected with a message. */
+    /* First-wave sanity: a fully built board still has no tower-count limit. */
     begin(&g, 44u);
-    g.towerCount = MAX_TOWERS;
-    game_clear_message(&g);
-    CHECK(game_place_tower(&g, 0, 0) == false);
-    CHECK(text_contains(g.message, "tower limit"));
-    CHECK(g.towerCount == MAX_TOWERS);
+    g.gold = 1000000;
+    for (i = 0; i < 12; ++i) {
+        CHECK(game_place_tower(&g, i, 0) == true);
+    }
+    CHECK(g.towerCount == 12);
+    CHECK(!text_contains(g.message, "tower limit"));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1764,7 +2008,7 @@ static void test_capacity_limits(void)
 
 int main(void)
 {
-    printf("Elemental Defense - portable core unit tests (v0.3)\n");
+    printf("Elemental Defense - portable core unit tests (v0.7)\n");
     printf("===================================================\n");
 
     RUN_TEST(test_tower_specs);
@@ -1786,6 +2030,7 @@ int main(void)
     RUN_TEST(test_cell_center);
     RUN_TEST(test_wave_composition);
     RUN_TEST(test_spawn_intervals);
+    RUN_TEST(test_long_run_scaling);
     RUN_TEST(test_spawn_layer_counts_by_wave);
     RUN_TEST(test_layer_composition_truthful);
     RUN_TEST(test_damage_application_all_types);
@@ -1803,7 +2048,7 @@ int main(void)
     RUN_TEST(test_leak_costs_life);
     RUN_TEST(test_idle_player_loses);
     RUN_TEST(test_gameover_freezes_simulation);
-    RUN_TEST(test_victory_after_25_waves);
+    RUN_TEST(test_victory_after_1000_waves);
     RUN_TEST(test_determinism);
     RUN_TEST(test_speed_multiplier);
     RUN_TEST(test_cycle_speed);
@@ -1812,7 +2057,8 @@ int main(void)
     RUN_TEST(test_events);
     RUN_TEST(test_messages);
     RUN_TEST(test_selection_and_cursor);
-    RUN_TEST(test_capacity_limits);
+    RUN_TEST(test_no_tower_cap);
+    RUN_TEST(test_capacity_pools);
 
     printf("===================================================\n");
     printf("%d/%d tests passed, %d checks failed\n", g_tests - g_tests_failed,

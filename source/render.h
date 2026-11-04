@@ -10,9 +10,11 @@
  * app.c and ui.c, so the PC preview harness can render the same frames.
  *
  * Board geometry: the 26x13 board is drawn at 15 px per cell, i.e. 390x195 px,
- * anchored at (5, 38) on the 400x240 top screen.  That leaves a 38 px HUD strip
- * at the top and a 7 px margin at the bottom.  Cell space (see game.h) maps to
- * top-screen pixels with `BOARD_X + cellX * BOARD_CELL`.
+ * centred on the 400x240 top screen at (5, 22).  The top screen is a pure
+ * battlefield: there is no persistent HUD band any more, the board sits inside
+ * a chunky comic frame and a short "WAVE INCOMING" banner is the only overlay.
+ * Cell space (see game.h) maps to top-screen pixels with
+ * `BOARD_X + cellX * BOARD_CELL`.
  */
 #ifndef RENDER_H
 #define RENDER_H
@@ -24,10 +26,9 @@
 /* ---- board geometry on the 400x240 top screen ---- */
 #define BOARD_CELL 15.0f
 #define BOARD_X 5.0f
-#define BOARD_Y 38.0f
+#define BOARD_Y 22.0f
 #define BOARD_W ((float)GRID_COLS * BOARD_CELL)     /* 390 */
 #define BOARD_H ((float)GRID_ROWS * BOARD_CELL)     /* 195 */
-#define HUD_H BOARD_Y                               /* top HUD strip height */
 
 /* ---- palette -----------------------------------------------------------
  * Tuned for the 240p, glossy, often-outdoors 3DS LCD: every colour used for

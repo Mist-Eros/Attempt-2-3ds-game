@@ -1,11 +1,15 @@
 /*
- * Elemental Defense - content tables and balance formulas (v0.3).
+ * Elemental Defense - content tables and balance formulas (v0.7, 1000 waves).
  *
  * Source of truth for all numbers: docs/elements-spec.md (Borderlands-style
  * damage model) for the six towers / multipliers / status effects, and the
  * original LÖVE game (main.lua) for the wave, economy and upgrade numbers that
  * the spec kept. The simulation in game.c reads everything through these
  * accessors; it never hard-codes a balance number itself.
+ *
+ * v0.7 adds the long-run wave scaling described in the wave-composition block
+ * below (spawn cap / spawn-interval floor / late HP ramp / speed cap) and the
+ * 1000-wave campaign length (CORE_TOTAL_WAVES in core_internal.h).
  *
  * STATUS-EFFECT CONSTANTS: deliberately defined here as extern consts (not in
  * the public header) so the whole balance sheet lives in one file.
@@ -191,12 +195,48 @@ int game_selected_sell_value(const Game *g)
 
 /* ---- wave composition (main.lua:513-571 startWave) ---- */
 
+/*
+ * v0.7 long-run scaling (1000-wave campaign). Three single tuning knobs, all
+ * here so the whole late-game curve is one block:
+ *
+ *   - spawn count: the original 3+2*wave ramp saturates at 80 spawns (~wave 39)
+ *     so a wave stays a bounded burst instead of an endless stream;
+ *   - spawn interval: 3.0 - 0.05*wave with a 0.20 s floor (~wave 56) so late
+ *     waves are dense ~16-20 s bursts;
+ *   - HP: the original (15+3*(wave-1)) * kEnemyHpScale curve for the first 60
+ *     waves (early game is unchanged), then a linear late multiplier so waves
+ *     100-1000 keep ramping instead of becoming instant kills;
+ *   - speed: original ramp capped at CORE_ENEMY_SPEED_MAX_CELLS before the
+ *     elite x1.8 bonus (see core_enemy_speed_cells below).
+ *
+ * Tuned against tools/sim.c (mixed-army bot reaching wave 1000 with lives at
+ * risk; pure-GUN bot still dies in the early waves). The numbers only affect
+ * the wave curve, never the damage table.
+ */
+#define CORE_WAVE_MAX_SPAWNS          80
+#define CORE_WAVE_SPAWN_INTERVAL_FLOOR 0.20f
+#define CORE_HP_LATE_START_WAVE       60
+#define CORE_ENEMY_SPEED_MAX_CELLS    10.0f
+
+/* Extra HP multiplier per wave after CORE_HP_LATE_START_WAVE (0.0048 -> x5.51
+ * at wave 1000 on top of the base curve, i.e. 33.2k HP per normal enemy).
+ * Tuned with tools/sim.c: the default mixed bot clears 1000 waves on every test
+ * seed but ends with only 2-13 of 20 lives left; a maze bot wins comfortably
+ * (intended optimal style) and the pure-GUN bot dies in the early waves. */
+static const float kEnemyHpLatePerWave = 0.0048f;
+
 int core_wave_base_enemies(int wave)
 {
+    int count;
+
     if (wave < 1) {
         wave = 1;
     }
-    return 3 + wave * 2;
+    count = 3 + wave * 2;
+    if (count > CORE_WAVE_MAX_SPAWNS) {
+        count = CORE_WAVE_MAX_SPAWNS;
+    }
+    return count;
 }
 
 int core_wave_elite_count(int wave)
@@ -218,20 +258,26 @@ int core_wave_elite_count(int wave)
 
 int core_wave_total_spawns(int wave)
 {
-    /* Wave size is 3 + 2*wave INCLUDING the elites: regulars are
-     * (base - eliteCount) and the elite count is part of the wave (Lead's
-     * exact-quota rule from v0.2; the preview is exact because of it). */
+    /* Wave size is 3 + 2*wave (capped by core_wave_base_enemies) INCLUDING the
+     * elites: regulars are (base - eliteCount) and the elite count is part of
+     * the wave (Lead's exact-quota rule from v0.2; the preview is exact because
+     * of it). */
     return core_wave_base_enemies(wave);
 }
 
 float core_wave_spawn_interval(int wave)
 {
+    float interval;
+
     if (wave < 1) {
         wave = 1;
     }
-    /* main.lua:567 - max(0.8, 3.0 - wave*0.05). */
-    float interval = 3.0f - (float)wave * 0.05f;
-    return (interval < 0.8f) ? 0.8f : interval;
+    /* main.lua:567 ramp, but with a 0.20 s floor for the 1000-wave campaign. */
+    interval = 3.0f - (float)wave * 0.05f;
+    if (interval < CORE_WAVE_SPAWN_INTERVAL_FLOOR) {
+        interval = CORE_WAVE_SPAWN_INTERVAL_FLOOR;
+    }
+    return interval;
 }
 
 /*
@@ -239,23 +285,32 @@ float core_wave_spawn_interval(int wave)
  * guardrails in elements-spec.md section 4; the damage table and economy are
  * untouched).
  *
- * Why it is not 1.0: with the raw spec formula a mixed AI clears 25/25 waves
- * with 0 leaks AND a pure-GUN army also clears 25/25 with 0 leaks - enemies die
- * in one volley, so the layer/element system never matters. At 2.0x the mixed
- * AI clears 25/25 with 1 leak over the whole run, while the pure-GUN army dies
- * on wave 3 with zero kills: that is the intended "bring the right elements"
- * gameplay. Set back to 1.0f for the literal spec numbers.
+ * Why it is not 1.0: with the raw spec formula a mixed AI cleared the old
+ * 25-wave run with 0 leaks AND a pure-GUN army also cleared it with 0 leaks -
+ * enemies died in one volley, so the layer/element system never mattered. At
+ * 2.0x the mixed AI cleared 25/25 with 1 leak over the whole run, while the
+ * pure-GUN army died on wave 3 with zero kills: that is the intended "bring the
+ * right elements" gameplay. The v0.7 long-run curve (CORE_HP_LATE_START_WAVE /
+ * kEnemyHpLatePerWave) keeps that early-game feel and only grows after wave 60.
+ * Set back to 1.0f for the literal spec numbers.
  */
 static const float kEnemyHpScale = 2.0f;
 
 float core_enemy_hp(int wave, bool elite)
 {
+    float hp;
+
     if (wave < 1) {
         wave = 1;
     }
-    float hp = (float)(15 + (wave - 1) * 3) * kEnemyHpScale; /* main.lua:671 */
+    hp = (float)(15 + (wave - 1) * 3) * kEnemyHpScale; /* main.lua:671 */
+    if (wave > CORE_HP_LATE_START_WAVE) {
+        /* v0.7: linear late-game ramp, only after the early curve (unchanged). */
+        hp *= 1.0f + (float)(wave - CORE_HP_LATE_START_WAVE) *
+              kEnemyHpLatePerWave;
+    }
     if (elite) {
-        hp *= 2.5f;                                          /* main.lua:675 */
+        hp *= 2.5f;                                    /* main.lua:675 */
     }
     return hp;
 }
@@ -290,7 +345,22 @@ static const float kEnemySpeedScale = 0.25f;
 
 float core_enemy_speed_cells(int wave, bool elite)
 {
-    return core_enemy_speed(wave, elite) * kEnemySpeedScale;
+    float cells;
+
+    if (wave < 1) {
+        wave = 1;
+    }
+    /* Original linear ramp (wave 1 = 5 cells/s), saturated so a wave-1000
+     * normal enemy cannot move faster than CORE_ENEMY_SPEED_MAX_CELLS. The
+     * elite x1.8 bonus is applied after the cap (as in the pre-v0.7 formula). */
+    cells = (float)(20 + (wave - 1)) * kEnemySpeedScale;
+    if (cells > CORE_ENEMY_SPEED_MAX_CELLS) {
+        cells = CORE_ENEMY_SPEED_MAX_CELLS;
+    }
+    if (elite) {
+        cells *= 1.8f;
+    }
+    return cells;
 }
 
 float core_enemy_speed_scale(void)
