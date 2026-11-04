@@ -41,7 +41,7 @@ you can build as long as you like before calling the next one in.
 
 ## Playing it
 
-Grab `ElementalDefense.3dsx` from the [releases page](../../releases), drop it in `/3ds/` on your SD
+Grab `ElementalDefense.3dsx` from the [releases page](https://github.com/Mist-Eros/Attempt-2-3ds-game/releases), drop it in `/3ds/` on your SD
 card, launch it from the Homebrew Launcher. Needs a 3DS with homebrew (Luma3DS/CFW or any entry
 point that can run `.3dsx` files).
 
