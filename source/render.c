@@ -541,27 +541,46 @@ void render_background_gradient(int width, int height)
 /* Title screen                                                              */
 /* ------------------------------------------------------------------------ */
 
-/* Faint BL2-style title-screen backdrop: big diagonal hazard bands drifting
- * behind everything plus a huge ring watermark.  The global vertical gradient
- * underneath already provides the near-black navy base. */
+/* Faint BL2-style title backdrop: drifting diagonal hazard bands plus a large
+ * low-alpha "element ring" watermark (the five damage-type emblems arranged in
+ * a circle) so the background hints at the elements without fighting the
+ * weapon cards. */
 static void draw_menu_background(const App *app)
 {
+    static const int kRingTypes[5] = { DMG_FIRE, DMG_ELECTRIC, DMG_CORROSIVE,
+                                       DMG_SLAG, DMG_EXPLOSIVE };
+    const float ringX = 200.0f;
+    const float ringY = 138.0f;
+    const float ringR = 106.0f;
     int i;
 
-    for (i = 0; i < 3; i++) {
-        float drift = fmodf(app->menuTime * 5.0f + (float)i * 130.0f, 130.0f) - 130.0f;
-        float x = drift + (float)i * 150.0f;
+    for (i = 0; i < 2; i++) {
+        float drift = fmodf(app->menuTime * 4.0f + (float)i * 190.0f, 190.0f) - 190.0f;
+        float x = drift + (float)i * 210.0f;
 
-        gfx_fill_triangle(x, 0.0f, x + 84.0f, 0.0f, x - 60.0f, 240.0f,
-                          rgba(0.10f, 0.12f, 0.22f, 0.10f));
-        gfx_fill_triangle(x + 84.0f, 0.0f, x + 24.0f, 240.0f, x - 60.0f, 240.0f,
-                          rgba(0.10f, 0.12f, 0.22f, 0.10f));
+        gfx_fill_triangle(x, 0.0f, x + 70.0f, 0.0f, x - 54.0f, 240.0f,
+                          rgba(0.10f, 0.12f, 0.20f, 0.09f));
+        gfx_fill_triangle(x + 70.0f, 0.0f, x + 16.0f, 240.0f, x - 54.0f, 240.0f,
+                          rgba(0.10f, 0.12f, 0.20f, 0.09f));
     }
 
-    gfx_outline_circle(200.0f, 108.0f, 98.0f, 14.0f,
-                       rgba(0.12f, 0.15f, 0.30f, 0.11f));
-    gfx_outline_circle(200.0f, 108.0f, 72.0f, 2.0f,
-                       rgba(0.25f, 0.30f, 0.50f, 0.11f));
+    /* big faint element-ring watermark behind the card rack: the five real
+     * emblems arranged in a circle, then a translucent dark wash over them so
+     * they read as a watermark instead of competing with the cards. */
+    gfx_outline_circle(ringX, ringY, ringR, 12.0f,
+                       rgba(0.14f, 0.16f, 0.30f, 0.10f));
+    gfx_outline_circle(ringX, ringY, ringR - 20.0f, 2.0f,
+                       rgba(0.22f, 0.26f, 0.44f, 0.09f));
+    for (i = 0; i < 5; i++) {
+        float a = -1.57079632679f + (float)i * (EMBLEM_TWO_PI / 5.0f);
+        float ex = ringX + cosf(a) * ringR;
+        float ey = ringY + sinf(a) * ringR;
+
+        art_glow(ex, ey, 26.0f, art_emblem_color(kRingTypes[i], 1.0f), 0.10f);
+        art_weapon_emblem(ex, ey, 15.0f, kRingTypes[i]);
+    }
+    gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, (float)TOP_H,
+                  rgba(0.030f, 0.032f, 0.060f, 0.62f));
 }
 
 /* Darkens the screen edges a little so the eye lands on the title. */
@@ -674,13 +693,74 @@ void art_hazard_fill(float x, float y, float w, float h, GfxColor base,
     }
 }
 
+/* One BL2-style weapon card for the title-screen element rack: chamfered
+ * frame, element-coloured header strip with the damage-type name, a big
+ * emblem and a two-line effect caption.  The active card lifts 3 px, glows and
+ * brightens; the others stay slightly dimmed. */
+static void draw_element_card(float x, float y, float w, float h, int type,
+                              bool active, float pulse)
+{
+    static const char *const kEffect[TOWER_TYPE_COUNT] = {
+        "", "BURN", "STUN", "ACID", "SLAG", "AOE 1.3"
+    };
+    static const char *const kDetail[TOWER_TYPE_COUNT] = {
+        "", "2x vs HP", "2x vs SHD", "2x vs ARM", "+50% DMG", "3x SLOWER"
+    };
+    static const char *const kName[TOWER_TYPE_COUNT] = {
+        "GUN", "FIRE", "SHOCK", "CORROSIVE", "SLAG", "EXPLOSIVE"
+    };
+    GfxColor color = art_damage_color(type, 1.0f);
+    GfxColor textColor = COL_DAMAGE_TEXT[type];
+    GfxColor trim = rgba(color.r, color.g, color.b, active ? 0.95f : 0.48f);
+    GfxColor caption = active
+                           ? textColor
+                           : rgba(textColor.r, textColor.g, textColor.b, 0.88f);
+    float cx = x + w * 0.5f;
+    float nameY;
+    float emblemY;
+    float captionY;
+    float cut = 6.0f;
+
+    if (type < 0)
+        type = 0;
+    if (type >= TOWER_TYPE_COUNT)
+        type = TOWER_TYPE_COUNT - 1;
+
+    if (active) {
+        y -= 3.0f;
+        art_glow(cx, y + h * 0.5f, w * 0.80f, color, 0.10f + 0.08f * pulse);
+    }
+
+    art_panel(x, y, w, h, cut, trim, true);
+
+    /* element-coloured header strip, shaped to respect the chamfered corners */
+    gfx_fill_rect(x + cut, y, w - 2.0f * cut, 12.0f,
+                  rgba(color.r, color.g, color.b, active ? 1.0f : 0.78f));
+    gfx_fill_rect(x, y + cut, w, 12.0f - cut,
+                  rgba(color.r, color.g, color.b, active ? 1.0f : 0.78f));
+    nameY = y + 2.0f;
+    text_centered(cx, nameY, 1.0f, COL_MENU_INK, kName[type]);
+
+    emblemY = y + 46.0f;
+    art_glow(cx, emblemY, 24.0f, color, active ? 0.22f : 0.10f);
+    art_weapon_emblem(cx, emblemY, active ? 15.0f : 14.0f, type);
+
+    captionY = y + 68.0f;
+    text_centered(cx, captionY, 1.0f, caption, kEffect[type]);
+    text_centered(cx, captionY + 12.0f, 1.0f,
+                  active ? COL_WHITE : caption, kDetail[type]);
+}
+
 void render_menu_top(const App *app)
 {
-    static const int kEmblemOrder[5] = { DMG_FIRE, DMG_ELECTRIC, DMG_CORROSIVE,
-                                         DMG_SLAG, DMG_EXPLOSIVE };
-    static const char *const kEmblemNames[5] = { "FIRE", "SHOCK", "CORROSIVE",
-                                                 "SLAG", "EXPLOSIVE" };
+    static const int kCardTypes[5] = { DMG_FIRE, DMG_ELECTRIC, DMG_CORROSIVE,
+                                       DMG_SLAG, DMG_EXPLOSIVE };
+    const float cardW = 76.0f;
+    const float cardH = 92.0f;
+    const float cardGap = 4.0f;
+    const float cardTop = 92.0f;
     float pulse;
+    int active;
     int i;
 
     draw_menu_background(app);
@@ -692,53 +772,54 @@ void render_menu_top(const App *app)
         if (alpha <= 0.0f)
             continue;
         art_glow(p->x, p->y, p->size * 3.0f, rgba(p->r, p->g, p->b, 1.0f),
-                 alpha * 0.22f);
+                 alpha * 0.20f);
         gfx_fill_rect(p->x, p->y, p->size, p->size,
                       rgba(p->r, p->g, p->b, alpha));
     }
 
-    /* warm halo behind the comic title */
-    art_glow(200.0f, 52.0f, 115.0f, COL_GOLD, 0.07f);
-
-    /* chunky comic lettering: 8-direction black outline + drop shadow */
-    text_comic_centered(200.0f, 20.0f, 4.0f, COL_GOLD_SOFT, "ELEMENTAL");
-    text_comic_centered(200.0f, 58.0f, 3.0f, COL_WHITE, "DEFENSE");
-
-    /* small angled red banner tag tucked against the left edge of DEFENSE so
-     * it reads as a sticker rather than floating off on its own */
+    /* compact ATTEMPT 2 tag above the title block */
     {
-        float tx = 40.0f;
-        float ty = 62.0f;
+        float tx = 6.0f;
+        float ty = 1.0f;
         GfxColor tag = { 0.85f, 0.14f, 0.14f, 1.0f };
 
-        gfx_fill_triangle(tx, ty + 4.0f, tx + 74.0f, ty - 6.0f,
-                          tx + 80.0f, ty + 10.0f, tag);
-        gfx_fill_triangle(tx, ty + 4.0f, tx + 80.0f, ty + 10.0f,
-                          tx + 4.0f, ty + 20.0f, tag);
-        text_centered(tx + 40.0f, ty + 4.0f, 1.0f, COL_MENU_INK, "ATTEMPT 2");
+        gfx_fill_triangle(tx, ty + 2.0f, tx + 78.0f, ty - 2.0f,
+                          tx + 82.0f, ty + 8.0f, tag);
+        gfx_fill_triangle(tx, ty + 2.0f, tx + 82.0f, ty + 8.0f,
+                          tx + 4.0f, ty + 12.0f, tag);
+        text_centered(tx + 41.0f, ty + 1.0f, 1.0f, COL_MENU_INK, "ATTEMPT 2");
     }
 
-    /* the five Borderlands emblems are the centrepiece */
-    for (i = 0; i < 5; i++) {
-        int type = kEmblemOrder[i];
-        float cx = 40.0f + (float)i * 80.0f;
-        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.3f) * 2.0f;
-        float cy = 122.0f + bob;
+    /* comic title: the strongest element of the screen */
+    art_glow(200.0f, 46.0f, 118.0f, COL_GOLD, 0.07f);
+    text_comic_centered(200.0f, 16.0f, 4.0f, COL_GOLD_SOFT, "ELEMENTAL");
+    text_comic_centered(200.0f, 54.0f, 3.0f, COL_WHITE, "DEFENSE");
 
-        art_glow(cx, cy, 19.0f, art_emblem_color(type, 1.0f), 0.16f);
-        art_weapon_emblem(cx, cy, 10.0f, type);
-        text_centered(cx, 142.0f, 1.0f, COL_DAMAGE_TEXT[type], kEmblemNames[i]);
+    /* thin gold rule with hazard-stripe ends under the title */
+    art_hazard_strip(38.0f, 84.0f, 12.0f, 6.0f);
+    art_hazard_strip(350.0f, 84.0f, 12.0f, 6.0f);
+    gfx_fill_rect(54.0f, 86.0f, 292.0f, 2.0f, COL_GOLD);
+
+    /* the element rack: five weapon cards, active highlight cycles slowly */
+    active = (int)(app->menuTime * 0.8f) % 5;
+    pulse = 0.5f + 0.5f * sinf(app->menuTime * 2.6f);
+    for (i = 0; i < 5; i++) {
+        float x = 2.0f + (float)i * (cardW + cardGap);
+
+        draw_element_card(x, cardTop, cardW, cardH, kCardTypes[i], i == active,
+                          pulse);
     }
 
     /* chunky "press start" button */
     pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
-    art_comic_button(80.0f, 184.0f, 240.0f, 30.0f, rgba(0.07f, 0.06f, 0.12f, 1.0f),
-                     COL_GOLD, pulse);
-    text_centered(200.0f, 196.0f, 1.0f, COL_GOLD_SOFT, "PRESS A OR TAP START");
+    art_comic_button(80.0f, 192.0f, 240.0f, 30.0f,
+                     rgba(0.07f, 0.06f, 0.12f, 1.0f), COL_GOLD, pulse);
+    text_centered(200.0f, 204.0f, 1.0f, COL_GOLD_SOFT,
+                  "PRESS A OR TAP START");
 
     /* small footer balances the band under the prompt */
-    text_centered(200.0f, 222.0f, 1.0f, rgba(0.80f, 0.83f, 0.94f, 0.90f),
-                  "A 3DS HOMEBREW REMAKE - v0.4");
+    text_centered(200.0f, 228.0f, 1.0f, rgba(0.80f, 0.83f, 0.94f, 0.90f),
+                  "A 3DS HOMEBREW REMAKE");
 
     draw_menu_vignette();
 }

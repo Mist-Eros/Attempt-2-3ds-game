@@ -55,7 +55,7 @@ bool ui_rect_contains(UiRect r, float x, float y)
 
 UiRect ui_start_rect(void)
 {
-    UiRect r = { 48.0f, 112.0f, 224.0f, 64.0f };
+    UiRect r = { 44.0f, 126.0f, 232.0f, 64.0f };
     return r;
 }
 
@@ -265,36 +265,67 @@ static void draw_start_button(float pulse)
 
 static void draw_menu(const App *app)
 {
-    static const int kEmblemTypes[3] = { DMG_FIRE, DMG_ELECTRIC, DMG_SLAG };
-    static const char *const kEmblemNames[3] = { "FIRE", "SHOCK", "SLAG" };
+    static const int kCardTypes[5] = { DMG_FIRE, DMG_ELECTRIC, DMG_CORROSIVE,
+                                       DMG_SLAG, DMG_EXPLOSIVE };
+    const float cardW = 56.0f;
+    const float cardH = 52.0f;
+    const float cardTop = 64.0f;
     float pulse;
+    int active;
     int i;
 
-    /* comic title (same lettering treatment as the top screen).  Shifted down
-     * so the 8-direction outline keeps a margin from the screen edge; the old
-     * "TOWER DEFENSE" subtitle is dropped for a cleaner stack. */
-    art_glow(160.0f, 40.0f, 110.0f, COL_GOLD, 0.07f);
-    text_comic_centered(160.0f, 12.0f, 3.0f, COL_GOLD_SOFT, "ELEMENTAL");
-    text_comic_centered(160.0f, 42.0f, 2.0f, COL_WHITE, "DEFENSE");
+    /* faint drifting hazard bands so the bottom matches the top-screen mood */
+    gfx_fill_triangle(30.0f, 0.0f, 96.0f, 0.0f, -30.0f, 240.0f,
+                      rgba(0.10f, 0.12f, 0.20f, 0.07f));
+    gfx_fill_triangle(96.0f, 0.0f, 40.0f, 240.0f, -30.0f, 240.0f,
+                      rgba(0.10f, 0.12f, 0.20f, 0.07f));
+    gfx_fill_triangle(200.0f, 0.0f, 276.0f, 0.0f, 150.0f, 240.0f,
+                      rgba(0.10f, 0.12f, 0.20f, 0.06f));
+    gfx_fill_triangle(276.0f, 0.0f, 220.0f, 240.0f, 150.0f, 240.0f,
+                      rgba(0.10f, 0.12f, 0.20f, 0.06f));
 
-    /* three representative damage emblems */
-    for (i = 0; i < 3; i++) {
-        int type = kEmblemTypes[i];
-        float cx = 80.0f + (float)i * 80.0f;
-        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 1.5f;
-        float cy = 78.0f + bob;
+    /* comic title (same lettering treatment as the top screen) */
+    art_glow(160.0f, 34.0f, 110.0f, COL_GOLD, 0.07f);
+    text_comic_centered(160.0f, 8.0f, 3.0f, COL_GOLD_SOFT, "ELEMENTAL");
+    text_comic_centered(160.0f, 36.0f, 2.0f, COL_WHITE, "DEFENSE");
 
-        art_glow(cx, cy, 24.0f, art_emblem_color(type, 1.0f), 0.20f);
-        art_weapon_emblem(cx, cy, 9.0f, type);
-        text_centered(cx, 96.0f, 1.0f, COL_DAMAGE_TEXT[type], kEmblemNames[i]);
+    /* thin gold rule with hazard-stripe ends */
+    art_hazard_strip(24.0f, 55.0f, 10.0f, 6.0f);
+    art_hazard_strip(286.0f, 55.0f, 10.0f, 6.0f);
+    gfx_fill_rect(38.0f, 57.0f, 244.0f, 2.0f, COL_GOLD);
+
+    /* compact element card strip echoing the top-screen weapon cards */
+    active = (int)(app->menuTime * 0.8f + 2.0f) % 5;
+    pulse = 0.5f + 0.5f * sinf(app->menuTime * 2.6f);
+    for (i = 0; i < 5; i++) {
+        int type = kCardTypes[i];
+        float x = 12.0f + (float)i * (cardW + 4.0f);
+        float y = cardTop;
+        float cx = x + cardW * 0.5f;
+        GfxColor color = art_damage_color(type, 1.0f);
+        bool isActive = (i == active);
+
+        if (isActive) {
+            y -= 2.0f;
+            art_glow(cx, y + cardH * 0.5f, 32.0f, color, 0.10f + 0.08f * pulse);
+        }
+        art_panel(x, y, cardW, cardH, 5.0f,
+                  rgba(color.r, color.g, color.b, isActive ? 0.90f : 0.42f), true);
+        /* element header strip, shaped to respect the chamfer */
+        gfx_fill_rect(x + 5.0f, y, cardW - 10.0f, 8.0f,
+                      rgba(color.r, color.g, color.b, isActive ? 1.0f : 0.72f));
+        gfx_fill_rect(x, y + 5.0f, cardW, 3.0f,
+                      rgba(color.r, color.g, color.b, isActive ? 1.0f : 0.72f));
+        art_glow(cx, y + 30.0f, 18.0f, color, isActive ? 0.22f : 0.10f);
+        art_weapon_emblem(cx, y + 30.0f, isActive ? 11.5f : 10.5f, type);
     }
 
     pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
     draw_start_button(pulse);
 
-    text_centered(160.0f, 198.0f, 1.0f, COL_DIM,
-                  "ATTEMPT 2 - 3DS HOMEBREW - v0.4");
-    text_centered(160.0f, 216.0f, 1.0f, COL_DIM,
+    text_centered(160.0f, 202.0f, 1.0f, COL_DIM,
+                  "ATTEMPT 2 - 3DS HOMEBREW");
+    text_centered(160.0f, 220.0f, 1.0f, COL_DIM,
                   "D-PAD TO BUILD - TOUCH FOR BUTTONS");
 }
 
