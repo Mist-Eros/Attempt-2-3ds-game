@@ -20,7 +20,7 @@ TARGET      := ElementalDefense
 BUILD       := build
 SOURCES     := source source/core
 INCLUDES    := include
-DATA        :=
+DATA        := data
 GRAPHICS    :=
 
 # artifact metadata (shown by the Homebrew Launcher)
@@ -61,6 +61,11 @@ else
 endif
 
 export OFILES := $(addsuffix .o,$(BINFILES)) $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+
+# Generated bin2o headers (build/*_bin.h) are prerequisites of every compiled
+# source file, so parallel builds cannot race the data conversion.
+export OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export HFILES := $(addsuffix .h,$(subst .,_,$(BINFILES)))
 
 export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
                    $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
