@@ -1,0 +1,23 @@
+# build output
+build/
+*.o
+*.d
+*.elf
+*.3dsx
+*.cia
+*.map
+*.smdh
+*.bin.tmp
+
+# editor / os junk
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# local logs / test output
+*.log
+logs/
+out/
