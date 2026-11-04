@@ -110,10 +110,25 @@ void text_right(float rightX, float y, float scale, GfxColor color, const char *
 }
 
 /* ------------------------------------------------------------------------ */
-/* Pixel-art element glyphs (vertices follow the original LÖVE2D game)       */
+/* Tower damage-type glyphs (docs/elements-spec.md §3)                      */
 /* ------------------------------------------------------------------------ */
 
-void art_fire(float cx, float cy, float size, GfxColor color)
+/* GUN (normal): a fat grey bullet with a dark driving band. */
+static void icon_gun(float cx, float cy, float size, GfxColor color)
+{
+    float s = size;
+
+    gfx_fill_rect(cx - s * 0.85f, cy - s * 0.32f, s * 1.25f, s * 0.64f, color);
+    gfx_fill_triangle(cx + s * 0.40f, cy - s * 0.32f, cx + s * 0.95f, cy,
+                      cx + s * 0.40f, cy + s * 0.32f, color);
+    gfx_fill_rect(cx - s * 0.85f, cy - s * 0.32f, s * 0.55f, s * 0.24f,
+                  rgba(1.0f, 1.0f, 1.0f, 0.35f));
+    gfx_fill_rect(cx - s * 0.30f, cy - s * 0.32f, s * 0.16f, s * 0.64f,
+                  rgba(0.16f, 0.16f, 0.20f, 0.85f));
+}
+
+/* FIRE: the original LÖVE2D flame polygon, kept for continuity. */
+static void icon_fire(float cx, float cy, float size, GfxColor color)
 {
     float w = size * 0.8f;
     float xs[6] = { cx, cx - w, cx - w * 0.3f, cx, cx + w * 0.3f, cx + w };
@@ -125,41 +140,136 @@ void art_fire(float cx, float cy, float size, GfxColor color)
                     cy + size * 0.4f, cy + size * 0.1f, cy + size * 0.3f };
 
     poly_fill(xs, ys, 6, color);
-    poly_fill(hx, hy, 6, rgba(1.0f, 1.0f, 1.0f, 0.15f));
+    poly_fill(hx, hy, 6, rgba(1.0f, 1.0f, 1.0f, 0.22f));
 }
 
-void art_water(float cx, float cy, float size, GfxColor color)
+/* SHOCK (electric): a Z-shaped lightning bolt. */
+static void icon_shock(float cx, float cy, float size, GfxColor color)
 {
     float s = size;
-    float xs[6] = { cx, cx - s * 0.8f, cx - s * 0.5f, cx,
-                    cx + s * 0.5f, cx + s * 0.8f };
-    float ys[6] = { cy - s, cy + s * 0.2f, cy + s * 0.6f, cy + s,
-                    cy + s * 0.6f, cy + s * 0.2f };
-    float hx[4] = { cx - s * 0.2f, cx - s * 0.4f, cx - s * 0.2f, cx - s * 0.1f };
-    float hy[4] = { cy - s * 0.4f, cy - s * 0.1f, cy - s * 0.1f, cy - s * 0.3f };
+    float xs[6] = { cx + s * 0.30f, cx - s * 0.70f, cx - s * 0.08f,
+                    cx - s * 0.35f, cx + s * 0.70f, cx + s * 0.08f };
+    float ys[6] = { cy - s, cy + s * 0.12f, cy + s * 0.12f,
+                    cy + s, cy - s * 0.12f, cy - s * 0.12f };
+    float hx[4] = { cx + s * 0.05f, cx - s * 0.28f, cx - s * 0.02f, cx - s * 0.16f };
+    float hy[4] = { cy - s * 0.62f, cy - s * 0.02f, cy - s * 0.02f, cy + s * 0.55f };
 
     poly_fill(xs, ys, 6, color);
-    poly_fill(hx, hy, 4, rgba(1.0f, 1.0f, 1.0f, 0.20f));
+    poly_fill(hx, hy, 4, rgba(1.0f, 1.0f, 1.0f, 0.30f));
 }
 
-void art_leaf(float cx, float cy, float size, GfxColor color)
+/* CORROSIVE: a dripping acid blob. */
+static void icon_corrosive(float cx, float cy, float size, GfxColor color)
 {
     float s = size;
-    float xs[8] = { cx, cx - s * 0.7f, cx - s * 0.8f, cx - s * 0.3f,
-                    cx, cx + s * 0.3f, cx + s * 0.8f, cx + s * 0.7f };
-    float ys[8] = { cy - s, cy - s * 0.3f, cy + s * 0.2f, cy + s * 0.6f,
-                    cy + s * 0.4f, cy + s * 0.6f, cy + s * 0.2f, cy - s * 0.3f };
-    float stemHeight = s * 0.8f;
 
-    /* Fill first, then the detail, so the glyph never depends on the detail
-     * pass.  The stem is a 1 px rect (not gfx_line) so the forest glyph uses
-     * the same primitive family as fire/water. */
-    poly_fill(xs, ys, 8, color);
+    gfx_fill_circle(cx, cy + s * 0.12f, s * 0.66f, color);
+    gfx_fill_circle(cx - s * 0.38f, cy - s * 0.34f, s * 0.28f, color);
+    gfx_fill_triangle(cx - s * 0.34f, cy + s * 0.42f, cx + s * 0.34f,
+                      cy + s * 0.42f, cx, cy + s * 1.05f, color);
+    gfx_fill_circle(cx - s * 0.18f, cy - s * 0.02f, s * 0.20f,
+                    rgba(1.0f, 1.0f, 1.0f, 0.28f));
+    gfx_fill_circle(cx + s * 0.34f, cy + s * 0.30f, s * 0.13f,
+                    rgba(0.10f, 0.28f, 0.04f, 0.55f));
+}
 
-    if (stemHeight < 1.0f)
-        stemHeight = 1.0f;
-    gfx_fill_rect(floorf(cx), cy - s * 0.5f, 1.0f, stemHeight,
-                  rgba(0.0f, 0.0f, 0.0f, 0.22f));
+/* SLAG (purple): a crystal shard. */
+static void icon_slag(float cx, float cy, float size, GfxColor color)
+{
+    float s = size;
+    float xs[4] = { cx, cx + s * 0.64f, cx, cx - s * 0.64f };
+    float ys[4] = { cy - s, cy, cy + s, cy };
+    float hx[3] = { cx, cx + s * 0.30f, cx + s * 0.02f };
+    float hy[3] = { cy - s * 0.55f, cy - s * 0.05f, cy + s * 0.45f };
+
+    poly_fill(xs, ys, 4, color);
+    poly_fill(hx, hy, 3, rgba(1.0f, 1.0f, 1.0f, 0.30f));
+}
+
+/* BLASTER (explosive): a round bomb with a lit fuse. */
+static void icon_blaster(float cx, float cy, float size, GfxColor color)
+{
+    float s = size;
+    GfxColor body = { 0.22f, 0.20f, 0.26f, 1.0f };
+    GfxColor fuse = { 0.78f, 0.72f, 0.60f, 1.0f };
+
+    gfx_fill_circle(cx, cy + s * 0.14f, s * 0.70f, body);
+    gfx_fill_circle(cx - s * 0.24f, cy - s * 0.10f, s * 0.22f,
+                    rgba(1.0f, 1.0f, 1.0f, 0.16f));
+    gfx_fill_rect(cx - s * 0.10f, cy - s * 0.86f, s * 0.20f, s * 0.26f, fuse);
+    gfx_fill_rect(cx + s * 0.02f, cy - s * 1.02f, s * 0.34f, s * 0.14f, fuse);
+    gfx_fill_circle(cx + s * 0.44f, cy - s * 0.96f, s * 0.15f, color);
+}
+
+void art_tower_icon(float cx, float cy, float size, int damageType)
+{
+    GfxColor color = art_damage_color(damageType, 1.0f);
+
+    switch (damageType) {
+    case DMG_FIRE:
+        icon_fire(cx, cy, size, color);
+        break;
+    case DMG_ELECTRIC:
+        icon_shock(cx, cy, size, color);
+        break;
+    case DMG_CORROSIVE:
+        icon_corrosive(cx, cy, size, color);
+        break;
+    case DMG_SLAG:
+        icon_slag(cx, cy, size, color);
+        break;
+    case DMG_EXPLOSIVE:
+        icon_blaster(cx, cy, size, color);
+        break;
+    case DMG_NORMAL:
+    default:
+        icon_gun(cx, cy, size, color);
+        break;
+    }
+}
+
+GfxColor art_damage_color(int damageType, float alpha)
+{
+    GfxColor c;
+
+    if (damageType < 0)
+        damageType = 0;
+    if (damageType >= TOWER_TYPE_COUNT)
+        damageType = TOWER_TYPE_COUNT - 1;
+    c = COL_DAMAGE_TYPE[damageType];
+    c.a = alpha;
+    return c;
+}
+
+GfxColor art_damage_text_color(int damageType)
+{
+    if (damageType < 0)
+        damageType = 0;
+    if (damageType >= TOWER_TYPE_COUNT)
+        damageType = TOWER_TYPE_COUNT - 1;
+    return COL_DAMAGE_TEXT[damageType];
+}
+
+GfxColor art_layer_color(int layerType, float alpha)
+{
+    GfxColor c;
+
+    if (layerType < 0)
+        layerType = 0;
+    if (layerType >= MAX_LAYERS)
+        layerType = MAX_LAYERS - 1;
+    c = COL_LAYER[layerType];
+    c.a = alpha;
+    return c;
+}
+
+GfxColor art_layer_text_color(int layerType)
+{
+    if (layerType < 0)
+        layerType = 0;
+    if (layerType >= MAX_LAYERS)
+        layerType = MAX_LAYERS - 1;
+    return COL_LAYER_TEXT[layerType];
 }
 
 void art_star(float cx, float cy, float size, GfxColor color)
@@ -172,35 +282,6 @@ void art_star(float cx, float cy, float size, GfxColor color)
                      cy + s * 0.1f, cy - s * 0.3f, cy - s * 0.3f };
 
     poly_fill(xs, ys, 10, color);
-}
-
-void art_element_colored(float cx, float cy, float size, int element, GfxColor color)
-{
-    switch (element) {
-    case ELEMENT_FIRE:
-        art_fire(cx, cy, size, color);
-        break;
-    case ELEMENT_WATER:
-        art_water(cx, cy, size, color);
-        break;
-    case ELEMENT_FOREST:
-    default:
-        art_leaf(cx, cy, size, color);
-        break;
-    }
-}
-
-void art_element(float cx, float cy, float size, int element)
-{
-    int e = element;
-    GfxColor color;
-    const TowerSpec *spec;
-
-    if (e < 0 || e >= TOWER_TYPE_COUNT)
-        e = 0;
-    spec = game_tower_spec(e);
-    color = spec != NULL ? art_spec_color(spec->color, 1.0f) : COL_ELEMENT[e];
-    art_element_colored(cx, cy, size, e, color);
 }
 
 void art_coin(float cx, float cy, float radius)
@@ -304,18 +385,23 @@ void render_menu_top(const App *app)
     text_centered(200.0f, 103.0f, 1.0f, COL_MUTED, "TOWER DEFENSE");
     gfx_fill_rect(120.0f, 116.0f, 160.0f, 1.0f, kDivider);
 
-    /* the three elements, gently bobbing */
-    for (i = 0; i < TOWER_TYPE_COUNT; i++) {
-        float cx = 140.0f + (float)i * 60.0f;
-        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 2.0f;
-        float cy = 148.0f + bob;
-        GfxColor color = COL_ELEMENT[i];
-        GfxColor glow = COL_ELEMENT_GLOW[i];
+    /* three representative tower types on the title screen */
+    {
+        static const int kMenuTypes[3] = { DMG_FIRE, DMG_ELECTRIC, DMG_SLAG };
 
-        art_glow(cx, cy, 30.0f, glow, 0.20f);
-        art_element_colored(cx, cy, 14.0f, i, color);
-        text_centered(cx, 168.0f, 1.0f, COL_ELEMENT_TEXT[i],
-                      game_tower_spec(i) != NULL ? game_tower_spec(i)->name : "");
+        for (i = 0; i < 3; i++) {
+            int type = kMenuTypes[i];
+            float cx = 140.0f + (float)i * 60.0f;
+            float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 2.0f;
+            float cy = 148.0f + bob;
+            GfxColor color = art_damage_color(type, 1.0f);
+            const TowerSpec *spec = game_tower_spec(type);
+
+            art_glow(cx, cy, 30.0f, color, 0.20f);
+            art_tower_icon(cx, cy, 14.0f, type);
+            text_centered(cx, 168.0f, 1.0f, art_damage_text_color(type),
+                          spec != NULL ? spec->name : "");
+        }
     }
 
     /* "press start" prompt */
@@ -469,17 +555,14 @@ static void draw_board(const App *app, const int16_t pathMap[GRID_ROWS][GRID_COL
         }
     }
 
-    /* tint the cells that hold a tower with the tower's element colour */
+    /* tint the cells that hold a tower with the tower's damage-type colour */
     for (col = 0; col < g->towerCount; col++) {
         const Tower *tower = &g->towers[col];
-        const TowerSpec *spec;
+        GfxColor tint;
 
         if (!tower->active)
             continue;
-        spec = game_tower_spec(tower->element);
-        if (spec == NULL)
-            continue;
-        GfxColor tint = art_spec_color(spec->color, 0.06f);
+        tint = art_damage_color(tower->damageType, 0.06f);
         gfx_fill_rect(board_cell_left(tower->col), board_cell_top(tower->row),
                       BOARD_CELL, BOARD_CELL, tint);
     }
@@ -500,7 +583,29 @@ static void draw_board(const App *app, const int16_t pathMap[GRID_ROWS][GRID_COL
 
 static void tower_stats(const Tower *tower, float *damage, float *fireRate, float *range)
 {
-    game_tower_stats(tower->element, (int)tower->level, damage, fireRate, range);
+    game_tower_stats(tower->damageType, (int)tower->level, damage, fireRate, range);
+}
+
+/* Cheap ring built from thick line segments: used for enemy layers, status
+ * outlines and explosion rings.  Segments are tuned for 6-8 px radii at 240p;
+ * 3DS quads are cheap but this keeps a full 128-enemy wave well inside the
+ * citro2d object budget. */
+static void draw_ring(float cx, float cy, float radius, float thickness,
+                      GfxColor color, int segments)
+{
+    int i;
+    float step = 6.28318530718f / (float)segments;
+
+    if (radius <= 0.0f || segments < 3)
+        return;
+
+    for (i = 0; i < segments; i++) {
+        float a0 = (float)i * step;
+        float a1 = (float)(i + 1) * step;
+
+        gfx_line(cx + cosf(a0) * radius, cy + sinf(a0) * radius,
+                 cx + cosf(a1) * radius, cy + sinf(a1) * radius, thickness, color);
+    }
 }
 
 /* Range circles for the selected tower (bright) and the tower under the cursor
@@ -521,9 +626,8 @@ static void draw_range_previews(const App *app)
     if (cursorTower >= 0 && cursorTower != selected &&
         cursorTower < g->towerCount && g->towers[cursorTower].active) {
         const Tower *tower = &g->towers[cursorTower];
-        const TowerSpec *spec = game_tower_spec(tower->element);
-        GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                                      : COL_ELEMENT[tower->element % TOWER_TYPE_COUNT];
+        GfxColor color = art_damage_color(tower->damageType, 1.0f);
+
         tower_stats(tower, &damage, &fireRate, &range);
         gfx_fill_circle(cell_px_x((float)tower->col + 0.5f),
                         cell_px_y((float)tower->row + 0.5f),
@@ -532,9 +636,7 @@ static void draw_range_previews(const App *app)
 
     if (selected >= 0) {
         const Tower *tower = &g->towers[selected];
-        const TowerSpec *spec = game_tower_spec(tower->element);
-        GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                                      : COL_ELEMENT[tower->element % TOWER_TYPE_COUNT];
+        GfxColor color = art_damage_color(tower->damageType, 1.0f);
         float cx = cell_px_x((float)tower->col + 0.5f);
         float cy = cell_px_y((float)tower->row + 0.5f);
 
@@ -546,6 +648,39 @@ static void draw_range_previews(const App *app)
         gfx_outline_rect(board_cell_left(tower->col) + 0.5f,
                          board_cell_top(tower->row) + 0.5f,
                          BOARD_CELL - 1.0f, BOARD_CELL - 1.0f, 2.0f, color);
+    }
+}
+
+/* Acid puddles: translucent green blobs with a brighter rim, fading with the
+ * remaining life.  Drawn under towers and enemies. */
+static void draw_puddles(const App *app)
+{
+    const Game *g = &app->game;
+    int i;
+
+    for (i = 0; i < MAX_PUDDLES; i++) {
+        const Puddle *puddle = &g->puddles[i];
+        float frac;
+        float cx, cy, radius;
+
+        if (!puddle->active)
+            continue;
+        frac = puddle->maxLife > 0.0f ? puddle->life / puddle->maxLife : 0.0f;
+        if (frac <= 0.0f)
+            continue;
+        if (frac > 1.0f)
+            frac = 1.0f;
+
+        cx = cell_px_x(puddle->x);
+        cy = cell_px_y(puddle->y);
+        radius = puddle->radius * BOARD_CELL;
+
+        gfx_fill_circle(cx, cy, radius,
+                        rgba(COL_PUDDLE.r, COL_PUDDLE.g, COL_PUDDLE.b,
+                             0.10f + 0.18f * frac));
+        gfx_outline_circle(cx, cy, radius, 1.0f,
+                           rgba(COL_PUDDLE_RIM.r, COL_PUDDLE_RIM.g,
+                                COL_PUDDLE_RIM.b, 0.30f + 0.45f * frac));
     }
 }
 
@@ -564,11 +699,9 @@ static void draw_towers(const App *app)
         if (!tower->active || tower->col < 0 || tower->row < 0)
             continue;
 
-        spec = game_tower_spec(tower->element);
-        color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                             : COL_ELEMENT[tower->element % TOWER_TYPE_COUNT];
-        glow = spec != NULL ? art_spec_color(spec->glow, 1.0f)
-                            : COL_ELEMENT_GLOW[tower->element % TOWER_TYPE_COUNT];
+        spec = game_tower_spec(tower->damageType);
+        color = art_damage_color(tower->damageType, 1.0f);
+        glow = spec != NULL ? art_spec_color(spec->glow, 1.0f) : color;
 
         cx = cell_px_x((float)tower->col + 0.5f);
         cy = cell_px_y((float)tower->row + 0.5f);
@@ -584,7 +717,7 @@ static void draw_towers(const App *app)
         gfx_fill_rect(cx - 5.5f, cy + size * 0.55f, 11.0f, 2.0f,
                       rgba(0.0f, 0.0f, 0.0f, 0.35f));
 
-        art_element_colored(cx, cy, size, tower->element, color);
+        art_tower_icon(cx, cy, size, tower->damageType);
 
         /* level bar: 1 px progress line pinned to the bottom of the cell, so it
          * never collides with the glyph or the neighbouring row */
@@ -615,7 +748,6 @@ static void draw_beams(const App *app)
 
     for (i = 0; i < MAX_BEAMS; i++) {
         const Beam *beam = &g->beams[i];
-        const TowerSpec *spec;
         GfxColor color;
         float alpha;
         float x1, y1, x2, y2;
@@ -629,68 +761,137 @@ static void draw_beams(const App *app)
         if (alpha > 1.0f)
             alpha = 1.0f;
 
-        spec = game_tower_spec(beam->element);
-        color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                             : COL_ELEMENT[beam->element % TOWER_TYPE_COUNT];
+        color = art_damage_color(beam->damageType, 1.0f);
 
         x1 = cell_px_x(beam->x1);
         y1 = cell_px_y(beam->y1);
         x2 = cell_px_x(beam->x2);
         y2 = cell_px_y(beam->y2);
 
-        /* soft wide pass first, then the bright core (1 px core / 3 px glow,
-         * design.md 11.1) */
-        gfx_line(x1, y1, x2, y2, 3.0f, rgba(color.r, color.g, color.b, alpha * 0.14f));
-        gfx_line(x1, y1, x2, y2, 1.0f, rgba(color.r, color.g, color.b, alpha));
-        gfx_line(x1, y1, x2, y2, 1.0f, rgba(1.0f, 1.0f, 1.0f, alpha * 0.55f));
+        if (beam->kind == 1) {
+            /* explosive: expanding ring on the target instead of a line */
+            float progress = 1.0f - alpha;
+            float radius = beam->radius * BOARD_CELL * progress;
+
+            draw_ring(x2, y2, radius, 2.0f,
+                      rgba(color.r, color.g, color.b, alpha * 0.90f), 14);
+            draw_ring(x2, y2, radius * 0.62f, 1.0f,
+                      rgba(1.0f, 1.0f, 1.0f, alpha * 0.40f), 12);
+            return;
+        }
+
+        /* soft wide pass first, then the bright core (1 px core / 3 px glow) */
+        gfx_line(x1, y1, x2, y2, 3.0f,
+                 rgba(color.r, color.g, color.b, alpha * 0.14f));
+        gfx_line(x1, y1, x2, y2, 1.0f,
+                 rgba(color.r, color.g, color.b, alpha));
+        gfx_line(x1, y1, x2, y2, 1.0f,
+                 rgba(1.0f, 1.0f, 1.0f, alpha * 0.55f));
     }
 }
 
 static void draw_enemies(const App *app)
 {
+    /* outer -> inner ring radii.  Nudged up from the design-spec 6.0/4.2/2.4 at
+     * 1.5 px for the 240p LCD: 6.5/4.6/2.7 at 2 px reads clearly at 1x on the
+     * 3DS screen without leaving the 15 px cell. */
+    static const float kLayerRadius[MAX_LAYERS] = { 6.5f, 4.6f, 2.7f };
     const Game *g = &app->game;
-    int i;
+    int i, l;
+    int shown = 0;
 
     for (i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *enemy = &g->enemies[i];
-        const EnemySpec *spec;
-        GfxColor color;
-        float cx, cy, size;
+        float cx, cy;
+        int layers;
+        int innermost = -1;
+        float innermostFrac = 0.0f;
 
         if (!enemy->active)
             continue;
-
-        spec = game_enemy_spec(enemy->element);
-        color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                             : COL_ELEMENT[enemy->element % TOWER_TYPE_COUNT];
+        if (++shown > MAX_ENEMIES)
+            break;
 
         cx = cell_px_x(enemy->x);
         cy = cell_px_y(enemy->y);
-        size = enemy->elite ? 9.0f : 5.0f;   /* design.md 11.1 */
+        layers = enemy->layerCount;
+        if (layers < 1)
+            layers = 1;
+        if (layers > MAX_LAYERS)
+            layers = MAX_LAYERS;
 
-        if (enemy->elite) {
-            art_glow(cx, cy, size * 2.3f, COL_GOLD, 0.16f);
-            gfx_outline_rect(cx - size - 2.0f, cy - size - 2.0f,
-                             size * 2.0f + 4.0f, size * 2.0f + 4.0f, 1.0f,
-                             rgba(1.0f, 1.0f, 1.0f, 0.12f));
-            gfx_outline_rect(cx - size - 3.0f, cy - size - 3.0f,
-                             size * 2.0f + 6.0f, size * 2.0f + 6.0f, 1.0f,
-                             rgba(1.0f, 0.8f, 0.2f, 0.18f));
+        if (enemy->elite)
+            art_glow(cx, cy, 14.0f, COL_GOLD, 0.14f);
+
+        /* concentric layer rings, outside-in; destroyed layers vanish */
+        for (l = 0; l < layers; l++) {
+            const EnemyLayer *layer = &enemy->layers[l];
+            float frac;
+            GfxColor color;
+
+            if (layer->maxHp <= 0.0f)
+                continue;
+            frac = layer->hp / layer->maxHp;
+            if (frac <= 0.0f)
+                continue;
+            if (frac > 1.0f)
+                frac = 1.0f;
+
+            color = art_layer_color(layer->type, 0.45f + 0.55f * frac);
+            draw_ring(cx, cy, kLayerRadius[l], 2.0f, color, 12);
+            innermost = l;
+            innermostFrac = frac;
         }
 
-        art_element_colored(cx, cy, size, enemy->element, color);
+        /* coloured core dot so the current layer colour is obvious at a glance */
+        if (innermost >= 0) {
+            GfxColor coreColor =
+                art_layer_color(enemy->layers[innermost].type,
+                                0.45f + 0.55f * innermostFrac);
+            gfx_fill_circle(cx, cy, 2.3f, coreColor);
+        }
 
+        /* white hit flash */
         if (enemy->hitFlash > 0.0f) {
             float flash = enemy->hitFlash * 2.5f;
-            if (flash > 0.85f)
-                flash = 0.85f;
-            art_element_colored(cx, cy, size, enemy->element,
-                                rgba(1.0f, 1.0f, 1.0f, flash));
+            if (flash > 0.80f)
+                flash = 0.80f;
+            gfx_fill_circle(cx, cy, 6.2f, rgba(1.0f, 1.0f, 1.0f, flash));
         }
 
-        if (enemy->maxHp > 0.0f)
-            art_health_bar(cx, cy - size - 5.0f, 13.0f, 3.0f,
-                           enemy->hp / enemy->maxHp);
+        /* elite: extra white outline ring */
+        if (enemy->elite)
+            draw_ring(cx, cy, 7.5f, 1.0f, rgba(1.0f, 1.0f, 1.0f, 0.64f), 12);
+
+        /* slag: pulsing purple outline */
+        if (enemy->slagTimer > 0.0f) {
+            float pulse = 0.45f + 0.35f * (0.5f + 0.5f * sinf(app->time * 10.0f));
+            draw_ring(cx, cy, 8.4f, 1.0f,
+                      rgba(0.80f, 0.45f, 1.0f, pulse), 12);
+        }
+
+        /* stunned: white flash */
+        if (enemy->stunTimer > 0.0f) {
+            float pulse = 0.16f + 0.26f * (0.5f + 0.5f * sinf(app->time * 24.0f));
+            gfx_fill_circle(cx, cy, 6.5f,
+                            rgba(COL_STUN_SPARK.r, COL_STUN_SPARK.g,
+                                 COL_STUN_SPARK.b, pulse));
+        }
+
+        /* burn: small orange motes, one per stack (capped for readability) */
+        if (enemy->burnStacks > 0) {
+            int stacks = enemy->burnStacks > 5 ? 5 : (int)enemy->burnStacks;
+            int m;
+
+            for (m = 0; m < stacks; m++) {
+                float angle = (float)m * 1.7f + app->time * 6.0f;
+                float rad = 4.5f + (float)(m % 2) * 1.6f;
+                float mx = cx + cosf(angle) * rad;
+                float my = cy - 1.0f + sinf(angle) * rad * 0.75f;
+
+                gfx_fill_rect(floorf(mx), floorf(my), 2.0f, 2.0f, COL_BURN_MOTE);
+            }
+        }
     }
 }
 
@@ -710,10 +911,12 @@ static void draw_cursor(const App *app)
 
     /* ghost of the selected tower type on an empty, buildable cell */
     if (tower < 0 && canPlace) {
-        GfxColor ghost = COL_ELEMENT[g->selectedType >= 0 && g->selectedType < TOWER_TYPE_COUNT
-                                         ? g->selectedType : 0];
-        art_element_colored(x + BOARD_CELL * 0.5f, y + BOARD_CELL * 0.5f, 6.0f,
-                            g->selectedType, rgba(ghost.r, ghost.g, ghost.b, 0.30f));
+        GfxColor ghost = art_damage_color(g->selectedType, 0.28f);
+        GfxColor rim = art_damage_color(g->selectedType, 0.55f);
+        float gx = x + BOARD_CELL * 0.5f;
+
+        gfx_fill_circle(gx, y + BOARD_CELL * 0.5f, 4.4f, ghost);
+        gfx_outline_circle(gx, y + BOARD_CELL * 0.5f, 5.4f, 1.0f, rim);
     }
 
     /* green = can build here, yellow = legal but unaffordable, white = tower,
@@ -807,6 +1010,7 @@ void render_game_top(const App *app)
 
     draw_hud(app);
     draw_board(app, pathMap);
+    draw_puddles(app);          /* ground decals: under towers and enemies */
     draw_portal_markers(g);
     draw_range_previews(app);
     draw_towers(app);

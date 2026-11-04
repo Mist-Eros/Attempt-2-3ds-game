@@ -54,25 +54,42 @@ static const GfxColor COL_YELLOW     = { 1.00f, 1.00f, 0.35f, 1.00f };
 static const GfxColor COL_BUILD_TAG  = { 1.00f, 1.00f, 0.45f, 1.00f };
 static const GfxColor COL_WAVE_TAG   = { 0.50f, 1.00f, 0.55f, 1.00f };
 
-/* Element colours, kept identical to game_tower_spec()/game_enemy_spec()
- * unless the core content tables say otherwise.  Indexed by Element. */
-static const GfxColor COL_ELEMENT[TOWER_TYPE_COUNT] = {
-    { 0.95f, 0.15f, 0.15f, 1.00f },   /* ELEMENT_FIRE   */
-    { 0.15f, 0.40f, 0.95f, 1.00f },   /* ELEMENT_WATER  */
-    { 0.15f, 0.90f, 0.15f, 1.00f }    /* ELEMENT_FOREST */
+/* ---- v0.3 damage model: layer + damage-type colours --------------------
+ * Layer colours are fixed by docs/elements-spec.md §1; damage-type colours
+ * drive beams, tower icons and palette highlights (§2/§3).  *_TEXT variants are
+ * lightened for actual glyphs so they stay legible on the 240p LCD. */
+static const GfxColor COL_LAYER[MAX_LAYERS] = {
+    { 0.95f, 0.18f, 0.18f, 1.00f },   /* LAYER_HP     red    */
+    { 0.28f, 0.55f, 1.00f, 1.00f },   /* LAYER_SHIELD blue   */
+    { 0.95f, 0.78f, 0.18f, 1.00f }    /* LAYER_ARMOR  yellow */
 };
-static const GfxColor COL_ELEMENT_GLOW[TOWER_TYPE_COUNT] = {
-    { 0.95f, 0.30f, 0.10f, 1.00f },
-    { 0.10f, 0.50f, 0.95f, 1.00f },
-    { 0.10f, 0.90f, 0.30f, 1.00f }
+static const GfxColor COL_LAYER_TEXT[MAX_LAYERS] = {
+    { 1.00f, 0.60f, 0.56f, 1.00f },
+    { 0.62f, 0.80f, 1.00f, 1.00f },
+    { 1.00f, 0.90f, 0.52f, 1.00f }
 };
-/* Lightened element colours for element NAMES / stats text; the saturated
- * COL_ELEMENT values stay for the glyphs themselves. */
-static const GfxColor COL_ELEMENT_TEXT[TOWER_TYPE_COUNT] = {
-    { 1.00f, 0.70f, 0.62f, 1.00f },   /* fire   */
-    { 0.64f, 0.82f, 1.00f, 1.00f },   /* water  */
-    { 0.58f, 1.00f, 0.62f, 1.00f }    /* forest */
+static const char *const LAYER_NAMES[MAX_LAYERS] = { "HP", "SHIELD", "ARMOR" };
+
+static const GfxColor COL_DAMAGE_TYPE[TOWER_TYPE_COUNT] = {
+    { 0.92f, 0.92f, 0.88f, 1.00f },   /* DMG_NORMAL    off-white */
+    { 1.00f, 0.45f, 0.12f, 1.00f },   /* DMG_FIRE      orange    */
+    { 0.25f, 0.85f, 1.00f, 1.00f },   /* DMG_ELECTRIC  cyan      */
+    { 0.55f, 1.00f, 0.20f, 1.00f },   /* DMG_CORROSIVE acid green*/
+    { 0.78f, 0.35f, 1.00f, 1.00f },   /* DMG_SLAG      purple    */
+    { 1.00f, 0.65f, 0.10f, 1.00f }    /* DMG_EXPLOSIVE amber     */
 };
+static const GfxColor COL_DAMAGE_TEXT[TOWER_TYPE_COUNT] = {
+    { 0.95f, 0.95f, 0.92f, 1.00f },   /* normal    */
+    { 1.00f, 0.74f, 0.52f, 1.00f },   /* fire      */
+    { 0.62f, 0.93f, 1.00f, 1.00f },   /* electric  */
+    { 0.72f, 1.00f, 0.58f, 1.00f },   /* corrosive */
+    { 0.90f, 0.70f, 1.00f, 1.00f },   /* slag      */
+    { 1.00f, 0.84f, 0.52f, 1.00f }    /* explosive */
+};
+static const GfxColor COL_PUDDLE      = { 0.40f, 0.85f, 0.14f, 1.00f };
+static const GfxColor COL_PUDDLE_RIM  = { 0.78f, 1.00f, 0.40f, 1.00f };
+static const GfxColor COL_BURN_MOTE   = { 1.00f, 0.58f, 0.12f, 1.00f };
+static const GfxColor COL_STUN_SPARK  = { 0.92f, 0.97f, 1.00f, 1.00f };
 
 /* ------------------------------------------------------------------------ */
 /* Screens                                                                   */
@@ -106,19 +123,23 @@ float board_cell_top(int row);
  * a fraction of a cell is handled by the caller). */
 bool board_hit_cell(float px, float py, int *col, int *row);
 
-/* Pixel-art element glyphs.  `cx/cy` is the centre, `size` roughly half the
- * height of the drawn glyph in pixels.  element is one of ELEMENT_FIRE,
- * ELEMENT_WATER, ELEMENT_FOREST. */
-void art_fire(float cx, float cy, float size, GfxColor color);
-void art_water(float cx, float cy, float size, GfxColor color);
-void art_leaf(float cx, float cy, float size, GfxColor color);
+/* Pixel-art tower glyphs, one per DamageType (0..5): gun, flame, lightning
+ * bolt, dripping acid, crystal, bomb.  `cx/cy` is the centre, `size` roughly
+ * half the height in pixels.  Colour comes from COL_DAMAGE_TYPE. */
+void art_tower_icon(float cx, float cy, float size, int damageType);
+
+/* Generic art bits still used by menus / previews. */
 void art_star(float cx, float cy, float size, GfxColor color);
-void art_element(float cx, float cy, float size, int element);
-void art_element_colored(float cx, float cy, float size, int element, GfxColor color);
 
 void art_coin(float cx, float cy, float radius);
 void art_heart(float cx, float cy, float size, GfxColor color);
 void art_glow(float cx, float cy, float radius, GfxColor color, float alpha);
+
+/* Colour tables, clamped to range; alpha is applied to the result. */
+GfxColor art_damage_color(int damageType, float alpha);
+GfxColor art_damage_text_color(int damageType);
+GfxColor art_layer_color(int layerType, float alpha);
+GfxColor art_layer_text_color(int layerType);
 
 /* Health bar centred on cx; y is the top edge.  frac in 0..1, green -> red. */
 void art_health_bar(float cx, float y, float width, float height, float frac);
@@ -128,7 +149,7 @@ void art_health_bar(float cx, float y, float width, float height, float frac);
 void text_centered(float cx, float y, float scale, GfxColor color, const char *text);
 void text_right(float rightX, float y, float scale, GfxColor color, const char *text);
 
-/* Converts a TowerSpec/EnemySpec colour triplet to a GfxColor. */
+/* Converts a TowerSpec colour triplet to a GfxColor. */
 GfxColor art_spec_color(const float rgb[3], float alpha);
 
 #endif /* RENDER_H */

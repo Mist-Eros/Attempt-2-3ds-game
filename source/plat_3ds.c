@@ -77,12 +77,13 @@ void gfx_init(void)
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
     /* Both screens are drawn inside one frame and citro2d only recycles its
      * vertex/index buffers at frame end (C2D_SceneBegin flushes but does not
-     * reset them).  Drawing routines silently fail when the buffer is full, so
-     * the 4096-object default is not enough: a fully populated late wave
-     * (96 towers + all enemy/beam slots + the text-heavy bottom panel + pause
-     * overlay) measures ~8.5k quads in the host renderer.  12288 objects gives
-     * ~45% headroom (~1.7 MB of linear memory, recycled every frame). */
-    C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 3);
+     * reset them).  Drawing routines silently fail when the buffer is full.
+     * v0.3 layered enemies are the expensive case: a pathological frame with
+     * 96 towers + all 128 enemy slots as 3-layer statused enemies + 128 beams
+     * + 16 puddles measures ~12.2k quads in the host renderer, so the 4096
+     * default is far too small.  16384 objects = 4x default (~2.3 MB of linear
+     * memory, recycled every frame) leaves comfortable headroom. */
+    C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 4);
     C2D_Prepare();
 
     s_targets[SCREEN_TOP] = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);

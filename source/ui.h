@@ -10,11 +10,11 @@
  * precise buttons without duplicating the layout.
  *
  * Screen layouts (320x240):
- *   PHASE_MENU : title, three element icons, big START button
+ *   PHASE_MENU : title, three tower icons, big START button
  *   BUILD/WAVE : 32 px header (gold | lives | wave | speed badge | pause badge)
- *                52 px tower palette, 66 px info/upgrade panel,
- *                77 px NEXT WAVE + incoming preview (build)
- *                or wave progress + stats            (wave)
+ *                2 x 3 tower palette (96x25 buttons), 66 px info/upgrade panel,
+ *                77 px NEXT WAVE + HP/SHIELD/ARMOR/elite preview (build)
+ *                or wave progress + stats                          (wave)
  *   paused     : dimmed play UI + RESUME / MAIN MENU
  *   result     : PLAY AGAIN / MAIN MENU
  *

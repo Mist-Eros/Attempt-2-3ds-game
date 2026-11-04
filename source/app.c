@@ -51,12 +51,12 @@ static float rng_unit(uint32_t *state)
 static void particle_spawn(App *app, MenuParticle *p, bool anywhere)
 {
     uint32_t *rng = &app->particleRng;
-    int element = (int)(rng_unit(rng) * (float)TOWER_TYPE_COUNT);
+    int type = (int)(rng_unit(rng) * (float)TOWER_TYPE_COUNT);
     float brightness;
 
-    element %= TOWER_TYPE_COUNT;
-    if (element < 0)
-        element += TOWER_TYPE_COUNT;
+    type %= TOWER_TYPE_COUNT;
+    if (type < 0)
+        type += TOWER_TYPE_COUNT;
 
     brightness = 0.55f + 0.45f * rng_unit(rng);
 
@@ -67,9 +67,9 @@ static void particle_spawn(App *app, MenuParticle *p, bool anywhere)
     p->size = 1.0f + floorf(rng_unit(rng) * 3.0f);   /* 1..3 px squares */
     p->maxLife = 1.4f + rng_unit(rng) * 3.4f;
     p->life = anywhere ? rng_unit(rng) * p->maxLife : p->maxLife;
-    p->r = COL_ELEMENT[element].r * brightness;
-    p->g = COL_ELEMENT[element].g * brightness;
-    p->b = COL_ELEMENT[element].b * brightness;
+    p->r = COL_DAMAGE_TYPE[type].r * brightness;
+    p->g = COL_DAMAGE_TYPE[type].g * brightness;
+    p->b = COL_DAMAGE_TYPE[type].b * brightness;
 }
 
 static void update_particles(App *app, float dt)
@@ -114,6 +114,8 @@ void app_new_run(App *app, uint32_t seed)
      * app->seed from the RTC before the first run. */
     app->seed = seed * 1664525u + 1013904223u;
     app->menuTime = 0.0f;
+    app->waveTrackedWave = app->game.wave;
+    app->waveEnemyTotal = 0;
 }
 
 bool app_is_paused(const App *app)
@@ -445,6 +447,19 @@ void app_tick(App *app, const Input *input, float dt)
 
     default:
         break;
+    }
+
+    /* Wave progress denominator for ui.c: the core does not expose a wave's
+     * total spawn count, so remember the largest (alive + queued) seen during
+     * the wave.  Reset as soon as Game.wave advances. */
+    if (g->wave != app->waveTrackedWave) {
+        app->waveTrackedWave = g->wave;
+        app->waveEnemyTotal = 0;
+    }
+    if (g->phase == PHASE_WAVE) {
+        int remaining = g->enemiesAlive + g->enemiesToSpawn;
+        if (remaining > app->waveEnemyTotal)
+            app->waveEnemyTotal = remaining;
     }
 
     /* Never leave feedback bits sitting in the state: the platform audio

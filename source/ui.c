@@ -9,10 +9,10 @@
  *
  * Vertical budget for the play screens:
  *   0  .. 31    header: gold | lives | wave | speed badge | pause badge
- *   34 .. 86    tower palette (3 buttons, 96x52)
- *   89 .. 155   info panel (selected/cursor tower stats + UPGRADE / SELL)
- *   159.. 236   NEXT WAVE + incoming preview   (build phase)
- *               wave progress + SPEED / PAUSE  (wave phase)
+ *   34 .. 87    tower palette: six damage types in 2 rows x 3 (96x25 each)
+ *   89 .. 155   info panel (selected/cursor tower: stats, effect, UPGRADE/SELL)
+ *   159.. 236   NEXT WAVE + HP/SHIELD/ARMOR/elite preview   (build phase)
+ *               wave progress + stats                       (wave phase)
  *
  * Placement note: the top screen is not touch sensitive on a 3DS, so towers
  * are built by moving the D-pad cursor and pressing A.  The bottom palette is
@@ -39,7 +39,8 @@
 
 #define HEADER_H 32.0f
 #define PALETTE_Y 34.0f
-#define PALETTE_H 52.0f
+#define PALETTE_ROW_H 25.0f
+#define PALETTE_ROW_GAP 3.0f
 #define PANEL_X 4.0f
 #define PANEL_Y 89.0f
 #define PANEL_W 312.0f
@@ -58,6 +59,8 @@ UiRect ui_start_rect(void)
     return r;
 }
 
+/* Six tower types in a 2x3 grid: 96x25 px cells, 8 px gaps, rows start at
+ * y=34 and y=62 (palette ends at 87, info panel starts at 89). */
 UiRect ui_tower_button_rect(int type)
 {
     UiRect r;
@@ -68,21 +71,22 @@ UiRect ui_tower_button_rect(int type)
         type = TOWER_TYPE_COUNT - 1;
 
     r.w = 96.0f;
-    r.h = PALETTE_H;
-    r.x = 6.0f + (float)type * 104.0f;   /* 6, 110, 214 with 8 px gaps */
-    r.y = PALETTE_Y;
+    r.h = PALETTE_ROW_H;
+    r.x = 6.0f + (float)(type % 3) * 104.0f;
+    r.y = PALETTE_Y + (float)(type / 3) * (PALETTE_ROW_H + PALETTE_ROW_GAP);
     return r;
 }
 
+/* Effect line lives between the stats row and the buttons. */
 UiRect ui_upgrade_rect(void)
 {
-    UiRect r = { 8.0f, 120.0f, 150.0f, 30.0f };
+    UiRect r = { 8.0f, 126.0f, 150.0f, 25.0f };
     return r;
 }
 
 UiRect ui_sell_rect(void)
 {
-    UiRect r = { 164.0f, 120.0f, 148.0f, 30.0f };
+    UiRect r = { 164.0f, 126.0f, 148.0f, 25.0f };
     return r;
 }
 
@@ -211,26 +215,27 @@ static void speed_text(float multiplier, char *buf, size_t size)
     snprintf(buf, size, "%.0fX", (double)multiplier);
 }
 
-/* One row of the "incoming" panel: element glyph + "xCOUNT".  Elite rows use
- * the gold star instead of an element glyph. */
-static void draw_preview_row(float x, float y, int count, bool elite, int element)
+/* One row of the "incoming" panel: a coloured layer dot + "LABEL xCOUNT".
+ * The elite row uses the gold star instead of a layer dot. */
+static void draw_preview_row(float x, float y, int count, int layerType, bool elite)
 {
-    char buf[16];
+    char buf[24];
     GfxColor color;
 
     if (elite) {
         art_star(x + 8.0f, y + 4.0f, 4.0f, COL_GOLD);
         color = COL_GOLD;
     } else {
-        if (element < 0 || element >= TOWER_TYPE_COUNT)
-            element = 0;
-        color = COL_ELEMENT[element];
-        art_element_colored(x + 8.0f, y + 4.0f, 4.0f, element, color);
-        color = COL_ELEMENT_TEXT[element];
+        if (layerType < 0 || layerType >= MAX_LAYERS)
+            layerType = 0;
+        color = art_layer_text_color(layerType);
+        gfx_fill_circle(x + 8.0f, y + 4.0f, 3.0f,
+                        art_layer_color(layerType, 0.95f));
     }
 
-    snprintf(buf, sizeof(buf), "x%d", count);
-    gfx_text(x + 18.0f, y, 1.0f, color, buf);
+    snprintf(buf, sizeof(buf), "%s x%d", elite ? "ELITE" : LAYER_NAMES[layerType],
+             count);
+    gfx_text(x + 16.0f, y, 1.0f, color, buf);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -249,19 +254,23 @@ static void draw_menu(const App *app)
     text_centered(160.0f, 44.0f, 2.0f, COL_WHITE, "DEFENSE");
     text_centered(160.0f, 66.0f, 1.0f, COL_MUTED, "TOWER DEFENSE");
 
-    /* element icons */
-    for (i = 0; i < TOWER_TYPE_COUNT; i++) {
-        float cx = 80.0f + (float)i * 80.0f;
-        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 1.5f;
-        float cy = 92.0f + bob;
-        GfxColor color = COL_ELEMENT[i];
-        GfxColor glow = COL_ELEMENT_GLOW[i];
-        const TowerSpec *spec = game_tower_spec(i);
+    /* three representative tower types (fire / shock / slag) */
+    {
+        static const int kMenuTypes[3] = { DMG_FIRE, DMG_ELECTRIC, DMG_SLAG };
 
-        art_glow(cx, cy, 26.0f, glow, 0.22f);
-        art_element_colored(cx, cy, 12.0f, i, color);
-        text_centered(cx, 110.0f, 1.0f, COL_ELEMENT_TEXT[i],
-                      spec != NULL ? spec->name : "");
+        for (i = 0; i < 3; i++) {
+            int type = kMenuTypes[i];
+            float cx = 80.0f + (float)i * 80.0f;
+            float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 1.5f;
+            float cy = 92.0f + bob;
+            GfxColor color = art_damage_color(type, 1.0f);
+            const TowerSpec *spec = game_tower_spec(type);
+
+            art_glow(cx, cy, 26.0f, color, 0.22f);
+            art_tower_icon(cx, cy, 12.0f, type);
+            text_centered(cx, 110.0f, 1.0f, art_damage_text_color(type),
+                          spec != NULL ? spec->name : "");
+        }
     }
 
     /* START button */
@@ -343,8 +352,25 @@ static void draw_header(const App *app)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Tower palette                                                             */
+/* Tower palette (six damage types, 2 x 3)                                   */
 /* ------------------------------------------------------------------------ */
+
+/* Display names follow docs/elements-spec.md §2 (the core spec names for #5 is
+ * "BLASTER" but the design calls that damage type EXPLOSIVE, and the panel uses
+ * the damage-type names, so the whole UI stays consistent).  9 chars max:
+ * x+21 + 9*8 = x+93 fits the 96 px button. */
+static const char *const kTowerNames[TOWER_TYPE_COUNT] = {
+    "GUN", "FIRE", "SHOCK", "CORROSIVE", "SLAG", "EXPLOSIVE"
+};
+
+static const char *tower_display_name(int damageType)
+{
+    if (damageType < 0)
+        damageType = 0;
+    if (damageType >= TOWER_TYPE_COUNT)
+        damageType = TOWER_TYPE_COUNT - 1;
+    return kTowerNames[damageType];
+}
 
 static void draw_tower_palette(const App *app)
 {
@@ -355,33 +381,31 @@ static void draw_tower_palette(const App *app)
     for (i = 0; i < TOWER_TYPE_COUNT; i++) {
         UiRect r = ui_tower_button_rect(i);
         const TowerSpec *spec = game_tower_spec(i);
-        const char *name = spec != NULL ? spec->name : "???";
         int cost = spec != NULL ? spec->cost : 0;
-        GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                                      : COL_ELEMENT[i];
-        GfxColor glow = spec != NULL ? art_spec_color(spec->glow, 1.0f)
-                                     : COL_ELEMENT_GLOW[i];
+        GfxColor color = art_damage_color(i, 1.0f);
+        GfxColor glow = spec != NULL ? art_spec_color(spec->glow, 1.0f) : color;
         bool selected = g->selectedType == i;
 
         if (selected)
-            art_glow(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 54.0f, glow, 0.10f);
+            art_glow(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 48.0f, glow, 0.12f);
 
         gfx_fill_rect(r.x, r.y, r.w, r.h,
-                      selected ? rgba(color.r, color.g, color.b, 0.16f)
+                      selected ? rgba(color.r, color.g, color.b, 0.18f)
                                : rgba(0.07f, 0.07f, 0.13f, 1.0f));
         gfx_outline_rect(r.x, r.y, r.w, r.h, selected ? 2.0f : 1.0f,
                          selected ? rgba(color.r, color.g, color.b, 0.90f)
-                                  : rgba(0.15f, 0.15f, 0.28f, 0.80f));
+                                  : rgba(0.22f, 0.22f, 0.42f, 0.70f));
 
-        art_glow(r.x + 18.0f, r.y + 30.0f, 16.0f, glow, selected ? 0.30f : 0.16f);
-        art_element_colored(r.x + 18.0f, r.y + 30.0f, 10.0f, i, color);
+        /* narrow icon column so the full 9-character names fit */
+        art_glow(r.x + 12.0f, r.y + 13.0f, 11.0f, glow, selected ? 0.30f : 0.14f);
+        art_tower_icon(r.x + 12.0f, r.y + 13.0f, 7.0f, i);
 
-        gfx_text(r.x + 34.0f, r.y + 9.0f, 1.0f,
-                 selected ? COL_WHITE : rgba(0.85f, 0.85f, 0.95f, 0.90f), name);
+        gfx_text(r.x + 21.0f, r.y + 4.0f, 1.0f,
+                 selected ? COL_WHITE : COL_MUTED, kTowerNames[i]);
 
-        art_coin(r.x + 41.0f, r.y + 35.0f, 4.0f);
+        art_coin(r.x + 26.0f, r.y + 19.0f, 2.5f);
         snprintf(buf, sizeof(buf), "%d", cost);
-        gfx_text(r.x + 48.0f, r.y + 31.0f, 1.0f,
+        gfx_text(r.x + 31.0f, r.y + 15.0f, 1.0f,
                  g->gold >= cost ? COL_GOLD : rgba(0.90f, 0.82f, 0.60f, 0.95f), buf);
     }
 }
@@ -390,10 +414,36 @@ static void draw_tower_palette(const App *app)
 /* Info / upgrade panel                                                      */
 /* ------------------------------------------------------------------------ */
 
+/* Short description of a damage type's signature effect (elements-spec §2).
+ * Plain letters only: the 8x8 font has no middot/arrow glyphs. */
+static void tower_effect_text(int damageType, char *buf, size_t size)
+{
+    switch (damageType) {
+    case DMG_FIRE:
+        snprintf(buf, size, "BURNS - 2x vs HP");
+        break;
+    case DMG_ELECTRIC:
+        snprintf(buf, size, "STUNS - 2x vs SHIELD");
+        break;
+    case DMG_CORROSIVE:
+        snprintf(buf, size, "ACID PUDDLE - 2x vs ARMOR");
+        break;
+    case DMG_SLAG:
+        snprintf(buf, size, "SLAG: +50%% DMG TAKEN");
+        break;
+    case DMG_EXPLOSIVE:
+        snprintf(buf, size, "AOE 1.3 - 3x SLOWER");
+        break;
+    case DMG_NORMAL:
+    default:
+        snprintf(buf, size, "NO SPECIAL EFFECT");
+        break;
+    }
+}
+
 static void draw_upgrade_sell(const App *app, int towerIndex)
 {
     const Game *g = &app->game;
-    const Tower *tower = &g->towers[towerIndex];
     char buf[32];
     int upgradeCost = game_upgrade_cost(g, towerIndex);
     int sellValue = game_sell_value(g, towerIndex);
@@ -407,7 +457,7 @@ static void draw_upgrade_sell(const App *app, int towerIndex)
         snprintf(buf, sizeof(buf), "UPGRADE %dG", upgradeCost);
     draw_button_frame(up, rgba(0.10f, 0.35f, 0.15f, 1.0f),
                       rgba(0.30f, 0.90f, 0.40f, 0.80f), canUpgrade);
-    text_centered(up.x + up.w * 0.5f, up.y + 11.0f, 1.0f,
+    text_centered(up.x + up.w * 0.5f, up.y + 9.0f, 1.0f,
                   upgradeCost < 0 ? COL_GOLD_SOFT
                                   : (canUpgrade ? COL_WHITE : COL_DIM),
                   buf);
@@ -417,9 +467,7 @@ static void draw_upgrade_sell(const App *app, int towerIndex)
     snprintf(buf, sizeof(buf), "SELL +%dG", sellValue);
     draw_button_frame(sell, rgba(0.35f, 0.10f, 0.10f, 1.0f),
                       rgba(0.90f, 0.30f, 0.30f, 0.80f), true);
-    text_centered(sell.x + sell.w * 0.5f, sell.y + 11.0f, 1.0f, COL_WHITE, buf);
-
-    (void)tower;
+    text_centered(sell.x + sell.w * 0.5f, sell.y + 9.0f, 1.0f, COL_WHITE, buf);
 }
 
 static void draw_info_panel(const App *app)
@@ -434,28 +482,30 @@ static void draw_info_panel(const App *app)
     if (towerIndex >= 0 && towerIndex < g->towerCount &&
         g->towers[towerIndex].active) {
         const Tower *tower = &g->towers[towerIndex];
-        const TowerSpec *spec = game_tower_spec(tower->element);
-        GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
-                                      : COL_ELEMENT[tower->element % TOWER_TYPE_COUNT];
-        GfxColor nameColor = COL_ELEMENT_TEXT[tower->element % TOWER_TYPE_COUNT];
+        GfxColor color = art_damage_color(tower->damageType, 1.0f);
+        GfxColor nameColor = art_damage_text_color(tower->damageType);
         float damage = 0.0f;
         float fireRate = 1.0f;
         float range = 0.0f;
         float dps;
 
-        game_tower_stats(tower->element, (int)tower->level, &damage, &fireRate, &range);
+        game_tower_stats(tower->damageType, (int)tower->level, &damage, &fireRate,
+                         &range);
         dps = fireRate > 0.0f ? damage / fireRate : 0.0f;
 
-        art_glow(16.0f, 99.0f, 12.0f, color, 0.18f);
-        art_element_colored(16.0f, 99.0f, 5.5f, tower->element, color);
+        art_glow(15.0f, 96.0f, 11.0f, color, 0.18f);
+        art_tower_icon(15.0f, 96.0f, 5.5f, tower->damageType);
 
-        snprintf(buf, sizeof(buf), "%s LV.%d", spec != NULL ? spec->name : "TOWER",
-                 (int)tower->level);
-        gfx_text(30.0f, 92.0f, 1.0f, nameColor, buf);
+        snprintf(buf, sizeof(buf), "%s LV.%d",
+                 tower_display_name(tower->damageType), (int)tower->level);
+        gfx_text(28.0f, 91.0f, 1.0f, nameColor, buf);
 
         snprintf(buf, sizeof(buf), "DMG %.1f   RNG %.1f   DPS %.1f",
                  (double)damage, (double)range, (double)dps);
-        gfx_text(10.0f, 107.0f, 1.0f, COL_MUTED, buf);
+        gfx_text(10.0f, 104.0f, 1.0f, COL_MUTED, buf);
+
+        tower_effect_text(tower->damageType, buf, sizeof(buf));
+        gfx_text(10.0f, 115.0f, 1.0f, nameColor, buf);
 
         draw_upgrade_sell(app, towerIndex);
     } else {
@@ -463,12 +513,13 @@ static void draw_info_panel(const App *app)
         bool canPlace = game_can_place_at(g, g->cursorCol, g->cursorRow,
                                           g->selectedType);
         const TowerSpec *selectedSpec = game_tower_spec(g->selectedType);
-        const char *name = selectedSpec != NULL ? selectedSpec->name : "TOWER";
+        const char *name = tower_display_name(g->selectedType);
         int cost = selectedSpec != NULL ? selectedSpec->cost : 0;
+        GfxColor selColor = art_damage_text_color(g->selectedType);
 
         snprintf(buf, sizeof(buf), "CURSOR C%d R%d", g->cursorCol, g->cursorRow);
-        gfx_text(10.0f, 93.0f, 1.0f, COL_MUTED, buf);
-        text_right(308.0f, 93.0f, 1.0f,
+        gfx_text(10.0f, 92.0f, 1.0f, COL_MUTED, buf);
+        text_right(308.0f, 92.0f, 1.0f,
                    isPath ? COL_GOLD : COL_DIM, isPath ? "ROAD" : "EMPTY CELL");
 
         /* Maze building: a tower on the road forces the BFS to find a detour,
@@ -476,21 +527,21 @@ static void draw_info_panel(const App *app)
          * the core refuses (start/goal, or a placement that would seal the
          * route) read as blocked instead. */
         if (canPlace && isPath) {
-            gfx_text(10.0f, 108.0f, 1.0f, rgba(0.60f, 1.00f, 0.65f, 1.0f),
+            gfx_text(10.0f, 106.0f, 1.0f, rgba(0.60f, 1.00f, 0.65f, 1.0f),
                      "ROAD - BUILD HERE TO REROUTE THEM");
         } else if (canPlace) {
             snprintf(buf, sizeof(buf), "A BUILDS %s FOR %dG", name, cost);
-            gfx_text(10.0f, 108.0f, 1.0f, COL_WHITE, buf);
+            gfx_text(10.0f, 106.0f, 1.0f, selColor, buf);
         } else if (isPath) {
-            gfx_text(10.0f, 108.0f, 1.0f, COL_MUTED,
+            gfx_text(10.0f, 106.0f, 1.0f, COL_MUTED,
                      "ROAD - THIS CELL CAN'T BE BLOCKED");
         } else {
-            gfx_text(10.0f, 108.0f, 1.0f, COL_MUTED, "CAN'T BUILD HERE RIGHT NOW");
+            gfx_text(10.0f, 106.0f, 1.0f, COL_MUTED, "CAN'T BUILD HERE RIGHT NOW");
         }
 
-        gfx_text(10.0f, 124.0f, 1.0f, COL_DIM,
-                 "L/R TYPE   A BUILD   B CLEAR");
-        gfx_text(10.0f, 138.0f, 1.0f, COL_DIM,
+        gfx_text(10.0f, 121.0f, 1.0f, COL_DIM,
+                 "L/R TYPE (6)   A BUILD   B CLEAR");
+        gfx_text(10.0f, 135.0f, 1.0f, COL_DIM,
                  "TAP A TYPE ABOVE TO SWITCH");
     }
 }
@@ -539,7 +590,7 @@ static void draw_build_section(const App *app)
     UiRect next = ui_next_wave_rect();
     UiRect preview = { 202.0f, BOTTOM_Y, 112.0f, BOTTOM_H };
     char buf[40];
-    int fire = 0, water = 0, forest = 0, elite = 0;
+    int hpLayers = 0, shieldLayers = 0, armorLayers = 0, elites = 0;
 
     /* next wave button */
     art_glow(next.x + next.w * 0.5f, next.y + next.h * 0.5f, 100.0f, COL_GREEN,
@@ -561,13 +612,16 @@ static void draw_build_section(const App *app)
     text_centered(next.x + next.w * 0.5f, next.y + 48.0f, 1.0f,
                   rgba(0.86f, 0.98f, 0.88f, 0.92f), "PRESS WHEN READY");
 
-    /* incoming composition */
+    /* incoming composition: total layers per layer type + elite count */
     panel_with_title(preview, "INCOMING");
-    game_wave_preview(g, &fire, &water, &forest, &elite);
-    draw_preview_row(preview.x + 10.0f, preview.y + 20.0f, fire, false, 0);
-    draw_preview_row(preview.x + 10.0f, preview.y + 34.0f, water, false, 1);
-    draw_preview_row(preview.x + 10.0f, preview.y + 48.0f, forest, false, 2);
-    draw_preview_row(preview.x + 10.0f, preview.y + 62.0f, elite, true, 0);
+    game_wave_preview(g, &hpLayers, &shieldLayers, &armorLayers, &elites);
+    draw_preview_row(preview.x + 10.0f, preview.y + 20.0f, hpLayers, LAYER_HP,
+                     false);
+    draw_preview_row(preview.x + 10.0f, preview.y + 34.0f, shieldLayers,
+                     LAYER_SHIELD, false);
+    draw_preview_row(preview.x + 10.0f, preview.y + 48.0f, armorLayers,
+                     LAYER_ARMOR, false);
+    draw_preview_row(preview.x + 10.0f, preview.y + 62.0f, elites, 0, true);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -579,8 +633,7 @@ static void draw_wave_section(const App *app)
     const Game *g = &app->game;
     UiRect panel = { 6.0f, BOTTOM_Y, 308.0f, BOTTOM_H };
     char buf[40];
-    int fire = 0, water = 0, forest = 0, elite = 0;
-    int total;
+    int total = app->waveEnemyTotal;
     int remaining;
     float frac;
 
@@ -591,8 +644,6 @@ static void draw_wave_section(const App *app)
     gfx_text(14.0f, 162.0f, 2.0f, COL_WHITE, buf);
     text_right(306.0f, 168.0f, 1.0f, COL_MUTED, "IN PROGRESS");
 
-    game_wave_preview(g, &fire, &water, &forest, &elite);
-    total = fire + water + forest + elite;
     remaining = g->enemiesAlive + g->enemiesToSpawn;
     if (remaining < 0)
         remaining = 0;

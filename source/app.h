@@ -96,6 +96,13 @@ typedef struct {
 
     MenuParticle particles[MENU_PARTICLE_COUNT];
     uint32_t particleRng;   /* xorshift state for menu particle respawns */
+
+    /* Wave progress bookkeeping for the bottom-screen bar.  The core does not
+     * expose the wave's spawn count, so app_tick remembers the peak number of
+     * enemies (alive + queued) seen during the current wave; ui.c uses it as
+     * the denominator.  Reset whenever Game.wave changes. */
+    int waveTrackedWave;    /* wave number waveEnemyTotal belongs to */
+    int waveEnemyTotal;     /* peak alive+queued enemies for that wave  */
 } App;
 
 /* ------------------------------------------------------------------------ */
