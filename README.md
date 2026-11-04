@@ -35,6 +35,9 @@ you can build as long as you like before calling the next one in.
 
 ## Screenshots
 
+Straight out of Azahar (top screen on top, touchscreen below). These are from the CI-built `.3dsx`, so
+they're what the release actually looks like.
+
 | Menu | Build phase | Wave in progress |
 |---|---|---|
 | ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![combat](docs/screenshots/wave.png) |
