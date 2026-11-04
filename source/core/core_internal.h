@@ -3,6 +3,10 @@
  *
  * Nothing in here is part of the frozen public contract in include/game.h.
  * The 3DS front end must never include this header: it only sees game.h.
+ *
+ * v0.3: six damage types, layered enemies (HP/SHIELD/ARMOR), status effects.
+ * The design numbers live in docs/elements-spec.md and are mirrored (only) in
+ * data.c, which the simulation reads through this header.
  */
 #ifndef CORE_INTERNAL_H
 #define CORE_INTERNAL_H
@@ -16,7 +20,7 @@
 #define CORE_MAX_STEP_DT         0.25f          /* defensive clamp inside game_step() */
 #define CORE_MESSAGE_TIME        1.5f           /* seconds a UI message stays up */
 #define CORE_BEAM_LIFE           0.15f          /* laser beam visual lifetime */
-#define CORE_HIT_FLASH_TIME      0.12f          /* enemy white-flash on hit */
+#define CORE_HIT_FLASH_TIME      0.12f          /* enemy white-flash on direct hit */
 
 /* Content constants that the original game hard-coded. */
 #define CORE_TOTAL_WAVES         25             /* original was endless; 25 = boss wave */
@@ -30,24 +34,54 @@
 
 /* ---- data.c: content tables and formulas ---- */
 
+/*
+ * Status-effect tuning (elements-spec.md section 2). Single source of truth is
+ * data.c; game.c reads these extern consts so there is exactly one place to
+ * tune them.
+ */
+extern const int   core_burn_max_stacks;      /* 5 */
+extern const float core_burn_duration;        /* 2.5 s, refreshed per hit */
+extern const float core_burn_dps_per_stack;   /* 1.0 dps, fire multipliers */
+extern const float core_stun_duration;        /* 0.30 s, movement stops */
+extern const float core_puddle_radius;        /* 0.7 cells */
+extern const float core_puddle_life;          /* 5 s */
+extern const float core_puddle_dps;           /* 2.0 dps, corrosive multipliers */
+extern const float core_slag_duration;        /* 4 s, refreshed per hit */
+extern const float core_slag_damage_amp;      /* x1.5 damage taken */
+extern const float core_slag_speed_mult;      /* x0.65 movement */
+extern const float core_explosion_life;       /* 0.30 s explosion ring visual */
+
 /* Wave composition. All of these are 1-based waves. */
 int   core_wave_base_enemies(int wave);       /* 3 + wave*2, before elites */
 int   core_wave_elite_count(int wave);        /* 10 on %25, 3 on %10, 1 on %5, else 0 */
 int   core_wave_total_spawns(int wave);       /* wave size including elites */
 float core_wave_spawn_interval(int wave);     /* max(0.8, 3.0 - wave*0.05) */
-float core_enemy_hp(int wave, bool elite);    /* (15 + (wave-1)*3) * 2.5 if elite */
+float core_enemy_hp(int wave, bool elite);    /* total HP over all layers */
 float core_enemy_speed(int wave, bool elite); /* original "speed" units, *1.8 if elite */
 
 /*
  * Enemy movement speed in CELLS PER SECOND. Deliberate deviation from the
  * LÖVE original: the original did t += dt*speed/100 with t normalised over the
  * whole path, so a longer (mazed) path did not buy the towers any extra time.
- * Here speed is absolute, so every extra cell of detour is extra tower time -
- * which is the whole point of the maze mechanic. SPEED_SCALE (data.c) is the
- * single tuning knob; see NOTES.md.
+ * Here speed is absolute - every extra cell of detour is extra tower time.
+ * SPEED_SCALE (data.c) is the single tuning knob.
  */
 float core_enemy_speed_cells(int wave, bool elite);
 float core_enemy_speed_scale(void);
+
+/* Layer composition of one enemy (elements-spec.md section 1). */
+int  core_enemy_layer_count(int wave, bool elite);  /* 1/2/3, elite +1 capped */
+bool core_spawn_slot_is_elite(int spawnSlot, int eliteCount);
+
+/*
+ * Layer types for one spawn slot. A pure function of (seed, wave, spawnSlot) so
+ * game_wave_preview() can reproduce exactly what the spawner will do without
+ * touching the RNG. `seed` is g->rng (nothing consumes the RNG during a run, so
+ * it stays equal to the game_new_run() seed).
+ * Writes up to MAX_LAYERS entries to out[] (outermost first); returns count.
+ */
+int  core_enemy_layer_types(uint32_t seed, int wave, bool elite, int spawnSlot,
+                            uint8_t *out);
 
 /* Cost in gold to take a tower from `level` to `level+1`; -1 when maxed. */
 int core_upgrade_cost_for_level(int level);

@@ -1,10 +1,14 @@
 /*
- * Elemental Defense - content tables and balance formulas.
+ * Elemental Defense - content tables and balance formulas (v0.3).
  *
- * Every number in this file was taken from the original LOVE2D game
- * (ElementalDefense/game/main.lua); the line references point at the Lua that
- * it came from. Keep the tables data-only: the simulation in game.c reads
- * them through the accessors, it never hard-codes a balance number.
+ * Source of truth for all numbers: docs/elements-spec.md (Borderlands-style
+ * damage model) for the six towers / multipliers / status effects, and the
+ * original LÖVE game (main.lua) for the wave, economy and upgrade numbers that
+ * the spec kept. The simulation in game.c reads everything through these
+ * accessors; it never hard-codes a balance number itself.
+ *
+ * STATUS-EFFECT CONSTANTS: deliberately defined here as extern consts (not in
+ * the public header) so the whole balance sheet lives in one file.
  */
 #include <stddef.h>
 
@@ -12,62 +16,86 @@
 #include "core_internal.h"
 
 /*
- * The original worked in pixels: one grid cell was 28 px, tower range was
- * 60 px. The core works in cells, so range becomes 60/28 (~2.14 cells).
+ * Tower range: the original worked in pixels (60 px, cell = 28 px). The core
+ * works in cells, so range is 60/28 cells for every damage type (spec section 2).
  */
 #define TOWER_RANGE_CELLS (60.0f / 28.0f)
+#define TOWER_BASE_COOLDOWN 0.80f /* the level-1 cooldown all towers share */
 
-/* main.lua:128-156 - all three towers start identical, elements differ in the
- * damage matrix only. Colours are the LÖVE colours, already 0..1. */
+/* ---- status effects (elements-spec.md section 2) ---- */
+
+const int   core_burn_max_stacks = 5;
+const float core_burn_duration = 2.5f;
+const float core_burn_dps_per_stack = 1.0f;
+const float core_stun_duration = 0.30f;
+const float core_puddle_radius = 0.7f;
+const float core_puddle_life = 5.0f;
+const float core_puddle_dps = 2.0f;
+const float core_slag_duration = 4.0f;
+const float core_slag_damage_amp = 1.5f;
+const float core_slag_speed_mult = 0.65f;
+const float core_explosion_life = 0.30f;
+
+/*
+ * The six towers, one damage type each (elements-spec.md section 2).
+ * Colours are the element identities the renderer/UI use for icons, beams and
+ * the palette; they are data, the front end only reads them.
+ */
 static const TowerSpec kTowerSpecs[TOWER_TYPE_COUNT] = {
     {
-        "Fire", 20, 3.0f, 0.8f, TOWER_RANGE_CELLS,
-        { 0.95f, 0.15f, 0.15f },
-        { 0.95f, 0.30f, 0.10f }
+        /* GUN */ "GUN", 20, 3.0f, TOWER_BASE_COOLDOWN, TOWER_RANGE_CELLS,
+        DMG_NORMAL, 0.0f,
+        { 0.75f, 0.75f, 0.78f }, { 0.45f, 0.45f, 0.50f }
     },
     {
-        "Water", 20, 3.0f, 0.8f, TOWER_RANGE_CELLS,
-        { 0.15f, 0.40f, 0.95f },
-        { 0.10f, 0.50f, 0.95f }
+        /* FIRE */ "FIRE", 20, 3.0f, TOWER_BASE_COOLDOWN, TOWER_RANGE_CELLS,
+        DMG_FIRE, 0.0f,
+        { 0.95f, 0.45f, 0.12f }, { 0.95f, 0.30f, 0.05f }
     },
     {
-        "Forest", 20, 3.0f, 0.8f, TOWER_RANGE_CELLS,
-        { 0.15f, 0.90f, 0.15f },
-        { 0.10f, 0.90f, 0.30f }
+        /* SHOCK */ "SHOCK", 20, 3.0f, TOWER_BASE_COOLDOWN, TOWER_RANGE_CELLS,
+        DMG_ELECTRIC, 0.0f,
+        { 0.25f, 0.80f, 1.00f }, { 0.10f, 0.60f, 1.00f }
+    },
+    {
+        /* CORROSIVE */ "CORROSIVE", 20, 3.0f, TOWER_BASE_COOLDOWN,
+        TOWER_RANGE_CELLS, DMG_CORROSIVE, 0.0f,
+        { 0.45f, 0.85f, 0.15f }, { 0.30f, 0.80f, 0.10f }
+    },
+    {
+        /* SLAG - low damage, marks targets (spec section 2) */
+        "SLAG", 15, 1.0f, TOWER_BASE_COOLDOWN, TOWER_RANGE_CELLS,
+        DMG_SLAG, 0.0f,
+        { 0.70f, 0.25f, 0.90f }, { 0.60f, 0.15f, 0.85f }
+    },
+    {
+        /* BLASTER - explosive AoE, 3x slower, 3x damage (spec section 2) */
+        "BLASTER", 30, 9.0f, TOWER_BASE_COOLDOWN * 3.0f, TOWER_RANGE_CELLS,
+        DMG_EXPLOSIVE, 1.3f,
+        { 1.00f, 0.70f, 0.15f }, { 1.00f, 0.50f, 0.05f }
     }
 };
 
-/* main.lua:158-162 - enemies use the same elemental colours as the towers. */
-static const EnemySpec kEnemySpecs[TOWER_TYPE_COUNT] = {
-    { "Fire",   { 0.95f, 0.15f, 0.15f }, { 0.95f, 0.30f, 0.10f } },
-    { "Water",  { 0.15f, 0.40f, 0.95f }, { 0.10f, 0.50f, 0.95f } },
-    { "Forest", { 0.15f, 0.90f, 0.15f }, { 0.10f, 0.90f, 0.30f } }
+/* Damage type x layer type (elements-spec.md section 2). Rows: DamageType,
+ * columns: LayerType (HP / SHIELD / ARMOR). 2.0 strong, 0.5 weak. */
+static const float kDamageMultiplier[TOWER_TYPE_COUNT][3] = {
+    /* vs HP  vs SHIELD  vs ARMOR */
+    { 1.0f,   1.0f,      1.0f }, /* DMG_NORMAL    */
+    { 2.0f,   0.5f,      0.5f }, /* DMG_FIRE      */
+    { 0.5f,   2.0f,      0.5f }, /* DMG_ELECTRIC  */
+    { 0.5f,   0.5f,      2.0f }, /* DMG_CORROSIVE */
+    { 1.0f,   1.0f,      1.0f }, /* DMG_SLAG      */
+    { 1.0f,   1.0f,      1.0f }  /* DMG_EXPLOSIVE */
 };
 
-/* main.lua:164-179 getDamageMultiplier(): rows are tower types, columns are
- * enemy elements. Asymmetric on purpose - fire melts forest but splashes off
- * water, water douses fire but is drunk by forest, forest drains water but
- * burns to fire. */
-static const float kDamageMultiplier[TOWER_TYPE_COUNT][TOWER_TYPE_COUNT] = {
-    /* vs FIRE  vs WATER  vs FOREST */
-    {  1.0f,     0.5f,     2.0f }, /* FIRE tower   */
-    {  2.0f,     1.0f,     0.5f }, /* WATER tower  */
-    {  0.5f,     2.0f,     1.0f }  /* FOREST tower */
-};
-
-/* main.lua:1434 - every upgrade doubles the damage. */
-static const float kDamageByLevel[TOWER_MAX_LEVEL] = {
-    3.0f, 6.0f, 12.0f, 24.0f, 48.0f, 96.0f, 192.0f, 384.0f, 768.0f, 1536.0f
-};
-
-/* main.lua:1435 - fireRate = floor(fireRate*0.9*100)/100, applied once per
- * upgrade. Precomputed so the table cannot drift with float rounding. */
-static const float kFireRateByLevel[TOWER_MAX_LEVEL] = {
+/* Cooldown table: base cooldown per level, the same for every tower.
+ * BLASTER's spec cooldown is 3x this (see game_tower_stats). */
+static const float kCooldownByLevel[TOWER_MAX_LEVEL] = {
     0.80f, 0.72f, 0.64f, 0.57f, 0.51f, 0.45f, 0.40f, 0.36f, 0.32f, 0.28f
 };
 
 /* main.lua:1430 - cost to go from the level in the index to the next level is
- * 20 * 2^(level-1). The last slot is unused (level 10 is the cap). */
+ * 20 * 2^(level-1) for every tower. The last slot is unused (level 10 is cap). */
 static const int kUpgradeCostByLevel[TOWER_MAX_LEVEL] = {
     20, 40, 80, 160, 320, 640, 1280, 2560, 5120, 0
 };
@@ -82,35 +110,39 @@ const TowerSpec *game_tower_spec(int type)
     return &kTowerSpecs[type];
 }
 
-const EnemySpec *game_enemy_spec(int element)
+float game_damage_multiplier(int damageType, int layerType)
 {
-    if (element < 0 || element >= TOWER_TYPE_COUNT) {
-        return NULL;
-    }
-    return &kEnemySpecs[element];
-}
-
-float game_damage_multiplier(int towerType, int enemyElement)
-{
-    if (towerType < 0) towerType = 0;
-    if (towerType >= TOWER_TYPE_COUNT) towerType = TOWER_TYPE_COUNT - 1;
-    if (enemyElement < 0) enemyElement = 0;
-    if (enemyElement >= TOWER_TYPE_COUNT) enemyElement = TOWER_TYPE_COUNT - 1;
-    return kDamageMultiplier[towerType][enemyElement];
+    if (damageType < 0) damageType = 0;
+    if (damageType >= TOWER_TYPE_COUNT) damageType = TOWER_TYPE_COUNT - 1;
+    if (layerType < 0) layerType = 0;
+    if (layerType > LAYER_ARMOR) layerType = LAYER_ARMOR;
+    return kDamageMultiplier[damageType][layerType];
 }
 
 void game_tower_stats(int type, int level,
                       float *damage, float *fireRate, float *range)
 {
+    const TowerSpec *spec;
+    float cooldownScale;
+
     if (type < 0) type = 0;
     if (type >= TOWER_TYPE_COUNT) type = TOWER_TYPE_COUNT - 1;
     if (level < 1) level = 1;
     if (level > TOWER_MAX_LEVEL) level = TOWER_MAX_LEVEL;
 
-    if (damage) *damage = kDamageByLevel[level - 1];
-    if (fireRate) *fireRate = kFireRateByLevel[level - 1];
+    spec = &kTowerSpecs[type];
+    cooldownScale = spec->fireRate / TOWER_BASE_COOLDOWN;
+
+    if (damage) {
+        /* Spec: upgrades double damage per level (levels 1-10). */
+        *damage = spec->damage * (float)(1 << (level - 1));
+    }
+    if (fireRate) {
+        /* Spec: existing cooldown table; BLASTER's is 3x the table. */
+        *fireRate = kCooldownByLevel[level - 1] * cooldownScale;
+    }
     /* The original never improves range on upgrade; it is the level-1 range. */
-    if (range) *range = kTowerSpecs[type].range;
+    if (range) *range = spec->range;
 }
 
 int core_upgrade_cost_for_level(int level)
@@ -140,8 +172,7 @@ int game_sell_value(const Game *g, int towerIndex)
     if (!g->towers[towerIndex].active) {
         return 0;
     }
-    /* main.lua:1449 - floor(getTotalCost(tower) * 0.75). "invested" tracks the
-     * same sum (20 for the tower plus each upgrade's cost). */
+    /* main.lua:1449 - floor(getTotalCost(tower) * 0.75). */
     return (g->towers[towerIndex].invested * 3) / 4;
 }
 
@@ -189,10 +220,7 @@ int core_wave_total_spawns(int wave)
 {
     /* Wave size is 3 + 2*wave INCLUDING the elites: regulars are
      * (base - eliteCount) and the elite count is part of the wave (Lead's
-     * exact-quota rule). The Lua instead added elites on top of baseEnemies
-     * while computing the HUD quota from baseEnemies - eliteCount, so its HUD
-     * undercounted the wave by eliteCount (design.md 6.6 copies that
-     * off-by-one; the preview here is exact instead). */
+     * exact-quota rule from v0.2; the preview is exact because of it). */
     return core_wave_base_enemies(wave);
 }
 
@@ -206,14 +234,28 @@ float core_wave_spawn_interval(int wave)
     return (interval < 0.8f) ? 0.8f : interval;
 }
 
+/*
+ * v0.3 balance: global enemy HP multiplier (single tuning knob, allowed by the
+ * guardrails in elements-spec.md section 4; the damage table and economy are
+ * untouched).
+ *
+ * Why it is not 1.0: with the raw spec formula a mixed AI clears 25/25 waves
+ * with 0 leaks AND a pure-GUN army also clears 25/25 with 0 leaks - enemies die
+ * in one volley, so the layer/element system never matters. At 2.0x the mixed
+ * AI clears 25/25 with 1 leak over the whole run, while the pure-GUN army dies
+ * on wave 3 with zero kills: that is the intended "bring the right elements"
+ * gameplay. Set back to 1.0f for the literal spec numbers.
+ */
+static const float kEnemyHpScale = 2.0f;
+
 float core_enemy_hp(int wave, bool elite)
 {
     if (wave < 1) {
         wave = 1;
     }
-    float hp = (float)(15 + (wave - 1) * 3); /* main.lua:671 */
+    float hp = (float)(15 + (wave - 1) * 3) * kEnemyHpScale; /* main.lua:671 */
     if (elite) {
-        hp *= 2.5f;                          /* main.lua:675 */
+        hp *= 2.5f;                                          /* main.lua:675 */
     }
     return hp;
 }
@@ -235,14 +277,14 @@ float core_enemy_speed(int wave, bool elite)
  *
  * The original moved enemies with t += dt*speed/100 where t was normalised over
  * the whole path, so a longer (mazed) path was walked in exactly the same
- * 100/speed seconds: mazing bought the player literally no extra tower time.
- * That defeats the maze-building mechanic, so the port moves enemies at an
- * absolute speed and a detour really is extra time under fire.
+ * 100/speed seconds: mazing bought the player no extra tower time. That defeats
+ * the maze-building mechanic, so the port moves enemies at an absolute speed
+ * and a detour really is extra time under fire.
  *
  * kEnemySpeedScale is the single balance knob:
  *   0.25 -> wave 1 = 5 cells/s, i.e. 5 s across the initial 25-cell straight
  *           road (same crossing time the original had), and a 60-cell maze
- *           costs 12 s at wave 1. Tune this and nothing else.
+ *           costs 12 s at wave 1.
  */
 static const float kEnemySpeedScale = 0.25f;
 
@@ -256,59 +298,133 @@ float core_enemy_speed_scale(void)
     return kEnemySpeedScale;
 }
 
-int core_wave_elite_delays(int wave, float *out, int max)
+/* ---- layered enemies (elements-spec.md section 1) ---- */
+
+int core_enemy_layer_count(int wave, bool elite)
 {
-    int count = 0;
-    int i;
-
-    if (!out || max <= 0 || wave < 1) {
-        return 0;
-    }
-
-    /* main.lua:534-556: the delay list is a little quirky. %25 blocks the %10
-     * and %5 branches (elseif chain), so a wave is never two kinds of elite
-     * wave at once. */
-    if (wave % 25 == 0) {
-        for (i = 1; i <= 10 && count < max; ++i) {
-            out[count++] = (float)i * 0.3f;
-        }
-    } else if (wave % 10 == 0) {
-        for (i = 1; i <= 3 && count < max; ++i) {
-            out[count++] = (float)i * 0.2f;
-        }
-    } else if (wave % 5 == 0) {
-        out[count++] = 0.5f;
-    }
-    return count;
-}
-
-void game_wave_preview(const Game *g, int *fire, int *water, int *forest, int *elite)
-{
-    int wave = g ? g->wave : 1;
-    int base;
-    int elites;
-    int regular;
-    int fireCount;
-    int waterCount;
+    int layers;
 
     if (wave < 1) {
         wave = 1;
     }
-
-    base = core_wave_base_enemies(wave);
-    elites = core_wave_elite_count(wave);
-    regular = base - elites;
-    if (regular < 0) {
-        regular = 0;
+    if (wave <= 3) {
+        layers = 1;
+    } else if (wave <= 8) {
+        layers = 2;
+    } else {
+        layers = 3;
     }
+    if (elite) {
+        ++layers; /* one extra layer, capped at MAX_LAYERS */
+    }
+    if (layers > MAX_LAYERS) {
+        layers = MAX_LAYERS;
+    }
+    return layers;
+}
 
-    /* main.lua:558-565. Note: these are the *planned* counts the original UI
-     * displayed. Actual spawns roll the element from the RNG (see NOTES.md). */
-    fireCount = regular / 3;
-    waterCount = regular / 3;
+bool core_spawn_slot_is_elite(int spawnSlot, int eliteCount)
+{
+    /* Match the original's net effect: slot 0 regular, all elites consecutively
+     * in slots 1..eliteCount, then regulars again. */
+    return spawnSlot >= 1 && spawnSlot <= eliteCount;
+}
 
-    if (fire) *fire = fireCount;
-    if (water) *water = waterCount;
-    if (forest) *forest = regular - fireCount - waterCount;
-    if (elite) *elite = elites;
+static uint32_t layer_hash(uint32_t seed, int wave, int spawnSlot)
+{
+    uint32_t h = seed;
+    h ^= (uint32_t)wave * 0x9E3779B1u;
+    h ^= (uint32_t)(spawnSlot + 1) * 0x85EBCA77u;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16;
+    return h;
+}
+
+int core_enemy_layer_types(uint32_t seed, int wave, bool elite, int spawnSlot,
+                           uint8_t *out)
+{
+    /* Every ordered pair of distinct types, and every permutation of the three
+     * layer types: picking one with the hash gives "two different types" and
+     * "all three in random order" from spec section 1. */
+    static const uint8_t pairs[6][2] = {
+        { LAYER_HP, LAYER_SHIELD }, { LAYER_SHIELD, LAYER_HP },
+        { LAYER_HP, LAYER_ARMOR },  { LAYER_ARMOR, LAYER_HP },
+        { LAYER_SHIELD, LAYER_ARMOR }, { LAYER_ARMOR, LAYER_SHIELD }
+    };
+    static const uint8_t permutations[6][3] = {
+        { LAYER_HP, LAYER_SHIELD, LAYER_ARMOR },
+        { LAYER_HP, LAYER_ARMOR, LAYER_SHIELD },
+        { LAYER_SHIELD, LAYER_HP, LAYER_ARMOR },
+        { LAYER_SHIELD, LAYER_ARMOR, LAYER_HP },
+        { LAYER_ARMOR, LAYER_HP, LAYER_SHIELD },
+        { LAYER_ARMOR, LAYER_SHIELD, LAYER_HP }
+    };
+    int count = core_enemy_layer_count(wave, elite);
+    uint32_t h = layer_hash(seed, wave, spawnSlot);
+    int i;
+
+    if (!out) {
+        return count;
+    }
+    if (count == 1) {
+        out[0] = (uint8_t)(h % 3u);
+    } else if (count == 2) {
+        const uint8_t *pair = pairs[h % 6u];
+        out[0] = pair[0];
+        out[1] = pair[1];
+    } else {
+        const uint8_t *perm = permutations[h % 6u];
+        for (i = 0; i < 3; ++i) {
+            out[i] = perm[i];
+        }
+    }
+    return count;
+}
+
+/*
+ * Layer totals for an entire wave (elements-spec.md section 3 "Incoming
+ * preview"). Pure function of (seed, wave), so the preview is exactly what the
+ * spawner will produce.
+ */
+static void wave_layer_totals(uint32_t seed, int wave, int *hpLayers,
+                              int *shieldLayers, int *armorLayers, int *elites)
+{
+    int counts[3] = { 0, 0, 0 };
+    int eliteCount;
+    int spawns;
+    int slot;
+
+    if (wave < 1) {
+        wave = 1;
+    }
+    eliteCount = core_wave_elite_count(wave);
+    spawns = core_wave_total_spawns(wave);
+    for (slot = 0; slot < spawns; ++slot) {
+        uint8_t types[MAX_LAYERS];
+        bool elite = core_spawn_slot_is_elite(slot, eliteCount);
+        int count = core_enemy_layer_types(seed, wave, elite, slot, types);
+        int i;
+        for (i = 0; i < count; ++i) {
+            ++counts[types[i]];
+        }
+    }
+    if (hpLayers) *hpLayers = counts[LAYER_HP];
+    if (shieldLayers) *shieldLayers = counts[LAYER_SHIELD];
+    if (armorLayers) *armorLayers = counts[LAYER_ARMOR];
+    if (elites) *elites = eliteCount;
+}
+
+void game_wave_preview(const Game *g, int *hpLayers, int *shieldLayers,
+                       int *armorLayers, int *elites)
+{
+    int wave = g ? g->wave : 1;
+    uint32_t seed = g ? g->rng : 0u;
+
+    if (wave < 1) {
+        wave = 1;
+    }
+    wave_layer_totals(seed, wave, hpLayers, shieldLayers, armorLayers, elites);
 }

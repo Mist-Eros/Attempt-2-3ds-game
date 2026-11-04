@@ -1,5 +1,5 @@
 /*
- * Elemental Defense - simulation core.
+ * Elemental Defense - simulation core (v0.3 combat model).
  *
  * Deterministic, allocation-free, portable C99. The 3DS front end only ever
  * calls the API in include/game.h; everything in this file is driven either by
@@ -15,9 +15,18 @@
  * directly get exactly the amount of simulation they asked for, which is what
  * makes both the unit tests and the headless sim reproducible.
  *
- * Order of operations inside a wave step (mirrors main.lua love.update):
- *   spawn -> move enemies (leaks) -> towers shoot -> apply damage -> cleanup
- *   -> wave complete check.
+ * Order of operations inside a wave step (mirrors main.lua love.update, with the
+ * v0.3 damage-over-time phases added):
+ *   spawn -> status effects tick (burn/acid, slag timers) -> move enemies
+ *   (stun/slag aware, leaks) -> towers shoot (layers + on-hit effects) ->
+ *   cleanup -> wave complete check.
+ *
+ * Damage model (elements-spec.md):
+ *   enemies are concentric layers, outermost first. All damage (direct, burn,
+ *   acid, blast) goes through apply_damage(): the current outermost layer takes
+ *   damage * type-vs-layer multiplier; a destroyed layer carries the unspent
+ *   raw damage into the next layer, which applies its own multiplier. Slagged
+ *   enemies take x1.5 from every source.
  */
 #include <string.h>
 
@@ -71,30 +80,6 @@ static bool tower_index_valid(const Game *g, int index)
     return g->towers[index].active;
 }
 
-/* xorshift32: the only source of randomness in the simulation. Every roll goes
- * through here so a fixed seed always produces the same run. */
-static uint32_t rng_next(Game *g)
-{
-    uint32_t x = g->rng;
-
-    if (x == 0) {
-        x = 0x9E3779B9u; /* xorshift dies at zero; never let that happen */
-    }
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    g->rng = x;
-    return x;
-}
-
-static int rng_below(Game *g, int bound)
-{
-    if (bound <= 0) {
-        return 0;
-    }
-    return (int)(rng_next(g) % (uint32_t)bound);
-}
-
 static void rebuild_occupancy(Game *g)
 {
     int i;
@@ -107,15 +92,161 @@ static void rebuild_occupancy(Game *g)
     }
 }
 
-static int spawn_enemy(Game *g, bool elite, int element)
+/* ------------------------------------------------------------------ */
+/* layered damage                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Apply `amount` raw damage of `damageType` to an enemy, outside-in, with the
+ * excess carrying into the next layer (elements-spec.md section 1/2). Returns
+ * true when the innermost layer is destroyed (the caller handles the kill).
+ */
+static bool apply_damage(Game *g, Enemy *e, int damageType, float amount)
+{
+    float pool;
+    float amp;
+
+    (void)g;
+    if (!e || !e->active || amount <= 0.0f) {
+        return false;
+    }
+
+    pool = amount;
+    /* Slag: +50% damage taken from everything (direct, burn, acid, blast). */
+    amp = (e->slagTimer > 0.0f) ? core_slag_damage_amp : 1.0f;
+
+    while (pool > 0.0f && e->layerCount > 0) {
+        EnemyLayer *layer = &e->layers[0];
+        float multiplier = game_damage_multiplier(damageType, layer->type) * amp;
+        float scaled = pool * multiplier;
+
+        if (multiplier <= 0.0f) {
+            break; /* cannot happen with the spec matrix, but do not divide */
+        }
+        if (scaled < layer->hp) {
+            layer->hp -= scaled;
+            pool = 0.0f;
+            break;
+        }
+
+        /* Layer destroyed. Work out how much raw damage it ate, then carry the
+         * rest into the next layer (which applies its own multiplier). */
+        pool -= layer->hp / multiplier;
+        if (pool < 0.0f) {
+            pool = 0.0f;
+        }
+        layer->hp = 0.0f;
+        {
+            int i;
+            for (i = 1; i < e->layerCount; ++i) {
+                e->layers[i - 1] = e->layers[i];
+            }
+            memset(&e->layers[e->layerCount - 1], 0,
+                   sizeof e->layers[e->layerCount - 1]);
+            --e->layerCount;
+        }
+    }
+
+    return e->layerCount == 0;
+}
+
+static void kill_enemy(Game *g, Enemy *e)
+{
+    if (!e->active) {
+        return;
+    }
+    e->active = false;
+    e->layerCount = 0;
+    --g->enemiesAlive;
+    ++g->kills;
+    g->gold += CORE_KILL_REWARD;
+    g->events |= GAME_EVT_ENEMY_DIE;
+}
+
+/* ------------------------------------------------------------------ */
+/* beams and puddles                                                  */
+/* ------------------------------------------------------------------ */
+
+static void spawn_beam(Game *g, const Tower *tower, float x2, float y2,
+                       int kind, float radius)
+{
+    int slot;
+    Beam *beam;
+    Vec2 from;
+    float life;
+
+    slot = -1;
+    for (int i = 0; i < MAX_BEAMS; ++i) {
+        if (!g->beams[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return; /* purely cosmetic: dropping a beam is fine */
+    }
+
+    from = game_cell_center(tower->col, tower->row);
+    beam = &g->beams[slot];
+    beam->active = true;
+    beam->damageType = tower->damageType;
+    beam->kind = (uint8_t)kind;
+    beam->x1 = from.x;
+    beam->y1 = from.y;
+    beam->x2 = x2;
+    beam->y2 = y2;
+    beam->radius = radius;
+    life = (kind == 1) ? core_explosion_life : CORE_BEAM_LIFE;
+    beam->life = life;
+    beam->maxLife = life;
+}
+
+/* Spawn an acid puddle at a cell-space position. At most MAX_PUDDLES live;
+ * when full the round-robin slot (the oldest puddle) is replaced. */
+static void spawn_puddle(Game *g, float x, float y)
+{
+    int slot = -1;
+    Puddle *puddle;
+
+    for (int i = 0; i < MAX_PUDDLES; ++i) {
+        if (!g->puddles[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        slot = g->puddleNext;
+        g->puddleNext = (g->puddleNext + 1) % MAX_PUDDLES;
+    }
+
+    puddle = &g->puddles[slot];
+    puddle->active = true;
+    puddle->x = x;
+    puddle->y = y;
+    puddle->radius = core_puddle_radius;
+    puddle->life = core_puddle_life;
+    puddle->maxLife = core_puddle_life;
+    puddle->dps = core_puddle_dps;
+}
+
+/* ------------------------------------------------------------------ */
+/* spawning                                                           */
+/* ------------------------------------------------------------------ */
+
+static int spawn_enemy(Game *g, bool elite, int spawnSlot)
 {
     int slot;
     Enemy *e;
     Vec2 start;
+    uint8_t types[MAX_LAYERS];
+    float totalHp;
+    float perLayer;
+    int layerCount;
+    int i;
 
     slot = -1;
     if (g->enemiesAlive < MAX_ENEMIES) {
-        for (int i = 0; i < MAX_ENEMIES; ++i) {
+        for (i = 0; i < MAX_ENEMIES; ++i) {
             if (!g->enemies[i].active) {
                 slot = i;
                 break;
@@ -127,13 +258,29 @@ static int spawn_enemy(Game *g, bool elite, int element)
     }
 
     e = &g->enemies[slot];
+    memset(e, 0, sizeof *e);
     e->active = true;
-    e->element = (uint8_t)element;
     e->elite = elite;
-    e->maxHp = core_enemy_hp(g->wave, elite);
-    e->hp = e->maxHp;
+
+    /* Layers: count and types are a pure function of (seed, wave, spawn slot),
+     * so game_wave_preview() reports exactly what will spawn (spec section 1). */
+    layerCount = core_enemy_layer_types(g->rng, g->wave, elite, spawnSlot,
+                                        types);
+    totalHp = core_enemy_hp(g->wave, elite);
+    perLayer = totalHp / (float)layerCount;
+    e->layerCount = (uint8_t)layerCount;
+    for (i = 0; i < layerCount; ++i) {
+        e->layers[i].type = types[i];
+        e->layers[i].maxHp = perLayer;
+        e->layers[i].hp = perLayer;
+    }
+
     e->pathPos = 0.0f;
     e->hitFlash = 0.0f;
+    e->burnStacks = 0;
+    e->burnTimer = 0.0f;
+    e->stunTimer = 0.0f;
+    e->slagTimer = 0.0f;
     core_path_position(&g->path, 0.0f, &start);
     e->x = start.x;
     e->y = start.y;
@@ -150,95 +297,47 @@ static float enemy_speed_cells(const Game *g, bool elite)
     return core_enemy_speed_cells(g->wave, elite);
 }
 
-/*
- * Element quotas.
- *
- * The original computed a per-element quota for the HUD and then rolled every
- * spawn uniformly at random (main.lua:558-576), so the preview was a lie and
- * waves swung wildly. This port spawns the exact quota the preview shows; the
- * order is a deterministic shuffle (draw from the remaining multiset with the
- * xorshift RNG) so consecutive waves do not feel identical.
- */
-static int next_regular_element(Game *g)
-{
-    int total = 0;
-    int pick;
-    int element;
-
-    for (element = 0; element < TOWER_TYPE_COUNT; ++element) {
-        total += (int)g->spawnQuota[element];
-    }
-    if (total <= 0) {
-        /* Quota exhausted (only possible if the wave formula was edited);
-         * fall back to a uniform roll rather than dividing by zero. */
-        return rng_below(g, TOWER_TYPE_COUNT);
-    }
-
-    pick = rng_below(g, total);
-    for (element = 0; element < TOWER_TYPE_COUNT; ++element) {
-        int available = (int)g->spawnQuota[element];
-        if (pick < available) {
-            --g->spawnQuota[element];
-            return element;
-        }
-        pick -= available;
-    }
-    return 0; /* unreachable: pick < total */
-}
-
 static void start_wave(Game *g)
 {
-    int base;
+    int hpLayers;
+    int shieldLayers;
+    int armorLayers;
     int elites;
-    int regular;
-    int fireCount;
-    int waterCount;
 
     g->phase = PHASE_WAVE;
     g->waveTime = 0.0f;
     g->spawnTimer = 0.0f;
     g->selectedTower = -1;
 
-    base = core_wave_base_enemies(g->wave);
-    elites = core_wave_elite_count(g->wave);
-    regular = base - elites;
-    if (regular < 0) {
-        regular = 0;
-    }
-
-    /* Exact element quotas: fire = water = floor(regular/3), forest takes the
-     * remainder (main.lua:558-565; this port spawns the quota instead of
-     * rolling every spawn randomly). */
-    fireCount = regular / 3;
-    waterCount = regular / 3;
-    g->spawnQuota[ELEMENT_FIRE] = (uint8_t)fireCount;
-    g->spawnQuota[ELEMENT_WATER] = (uint8_t)waterCount;
-    g->spawnQuota[ELEMENT_FOREST] = (uint8_t)(regular - fireCount - waterCount);
-
-    /* The original's per-elite delay list always resolves to the same net
-     * effect (design.md 6.4): spawn slot 1 is a regular, then all elites spawn
-     * consecutively in slots 2..1+E, then regulars again. Do that. */
-    g->elitePending = elites;
-    g->eliteDelayCount = elites; /* informational for the UI */
-    g->enemiesToSpawn = base;    /* wave size includes the elites */
+    g->enemiesToSpawn = core_wave_total_spawns(g->wave);
     g->spawnInterval = core_wave_spawn_interval(g->wave);
+    g->elitePending = core_wave_elite_count(g->wave);
+    g->eliteDelayCount = g->elitePending;
     g->enemiesAlive = 0;
+
+    /* Stage the truthful per-layer totals (same pure function the preview uses)
+     * so the UI can read them during the wave if it wants to. */
+    game_wave_preview(g, &hpLayers, &shieldLayers, &armorLayers, &elites);
+    g->layerQuota[LAYER_HP] = (uint8_t)hpLayers;
+    g->layerQuota[LAYER_SHIELD] = (uint8_t)shieldLayers;
+    g->layerQuota[LAYER_ARMOR] = (uint8_t)armorLayers;
 
     g->events |= GAME_EVT_WAVE_START;
 }
 
 static void update_spawning(Game *g, float sdt)
 {
+    int eliteCount;
+
     if (g->enemiesToSpawn <= 0) {
         return;
     }
+    eliteCount = core_wave_elite_count(g->wave);
 
     g->spawnTimer += sdt;
     while (g->spawnTimer >= g->spawnInterval && g->enemiesToSpawn > 0) {
-        int total;
-        int slotIndex;
+        int spawnSlot;
         bool elite;
-        int element;
 
         /* Do not consume a spawn when the enemy array is full; the wave would
          * silently lose enemies otherwise. The balance never gets close. */
@@ -250,25 +349,103 @@ static void update_spawning(Game *g, float sdt)
         }
         g->spawnTimer -= g->spawnInterval;
 
-        total = core_wave_total_spawns(g->wave);
-        slotIndex = total - g->enemiesToSpawn; /* 0-based spawn slot */
-        elite = (slotIndex >= 1 && g->elitePending > 0);
+        spawnSlot = core_wave_total_spawns(g->wave) - g->enemiesToSpawn;
+        elite = core_spawn_slot_is_elite(spawnSlot, eliteCount);
+        if (spawn_enemy(g, elite, spawnSlot) < 0) {
+            break;
+        }
+        --g->enemiesToSpawn;
         if (elite) {
-            --g->elitePending;
+            if (g->elitePending > 0) {
+                --g->elitePending;
+            }
             if (g->eliteDelayCount > 0) {
                 --g->eliteDelayCount;
             }
         }
-        /* Elites roll their element (they are not part of the preview quota,
-         * which only describes regulars). */
-        element = elite ? rng_below(g, TOWER_TYPE_COUNT)
-                        : next_regular_element(g);
-        if (spawn_enemy(g, elite, element) < 0) {
-            break;
-        }
-        --g->enemiesToSpawn;
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* status effects (burn / stun / slag / acid puddles)                 */
+/* ------------------------------------------------------------------ */
+
+static void update_status_effects(Game *g, float sdt)
+{
+    int i;
+
+    /* Per-enemy effects. Burn ticks first, then the timers run out. */
+    for (i = 0; i < MAX_ENEMIES; ++i) {
+        Enemy *e = &g->enemies[i];
+
+        if (!e->active) {
+            continue;
+        }
+        if (e->hitFlash > 0.0f) {
+            e->hitFlash -= sdt;
+            if (e->hitFlash < 0.0f) {
+                e->hitFlash = 0.0f;
+            }
+        }
+        if (e->burnStacks > 0) {
+            float burnDamage = (float)e->burnStacks * core_burn_dps_per_stack * sdt;
+            if (apply_damage(g, e, DMG_FIRE, burnDamage)) {
+                kill_enemy(g, e);
+                continue;
+            }
+            e->burnTimer -= sdt;
+            if (e->burnTimer <= 0.0f) {
+                e->burnTimer = 0.0f;
+                e->burnStacks = 0;
+            }
+        }
+        if (e->slagTimer > 0.0f) {
+            e->slagTimer -= sdt;
+            if (e->slagTimer < 0.0f) {
+                e->slagTimer = 0.0f;
+            }
+        }
+    }
+
+    /* Acid puddles: lifetime, then damage every enemy inside the radius. The
+     * damage type is corrosive, so each enemy's outer layer multiplier applies. */
+    for (i = 0; i < MAX_PUDDLES; ++i) {
+        Puddle *puddle = &g->puddles[i];
+        float radiusSq;
+
+        if (!puddle->active) {
+            continue;
+        }
+        puddle->life -= sdt;
+        if (puddle->life <= 0.0f) {
+            puddle->life = 0.0f;
+            puddle->active = false;
+            continue;
+        }
+        radiusSq = puddle->radius * puddle->radius;
+        for (int j = 0; j < MAX_ENEMIES; ++j) {
+            Enemy *e = &g->enemies[j];
+            float dx;
+            float dy;
+
+            if (!e->active) {
+                continue;
+            }
+            dx = e->x - puddle->x;
+            dy = e->y - puddle->y;
+            if (dx * dx + dy * dy > radiusSq) {
+                continue;
+            }
+            if (apply_damage(g, e, DMG_CORROSIVE, puddle->dps * sdt)) {
+                kill_enemy(g, e);
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* movement                                                           */
+/* ------------------------------------------------------------------ */
 
 /* Returns false if the run ended (lives hit zero) during this step. */
 static bool update_enemies(Game *g, float sdt)
@@ -283,18 +460,25 @@ static bool update_enemies(Game *g, float sdt)
             continue;
         }
 
-        if (e->hitFlash > 0.0f) {
-            e->hitFlash -= sdt;
-            if (e->hitFlash < 0.0f) {
-                e->hitFlash = 0.0f;
+        /* Stunned enemies do not advance at all (spec section 2). */
+        if (e->stunTimer > 0.0f) {
+            e->stunTimer -= sdt;
+            if (e->stunTimer < 0.0f) {
+                e->stunTimer = 0.0f;
             }
+            continue;
         }
 
-        e->pathPos += sdt * enemy_speed_cells(g, e->elite);
+        {
+            float speed = enemy_speed_cells(g, e->elite);
+            if (e->slagTimer > 0.0f) {
+                speed *= core_slag_speed_mult; /* slagged enemies are slowed */
+            }
+            e->pathPos += sdt * speed;
+        }
 
         if (e->pathPos >= g->path.length) {
-            /* Reached the goal: costs one life, gives no gold (the original
-             * gave +2 gold for this - not keeping that bug). */
+            /* Reached the goal: costs one life, gives no gold. */
             e->active = false;
             --g->enemiesAlive;
             ++g->leaks;
@@ -318,33 +502,89 @@ static bool update_enemies(Game *g, float sdt)
     return true;
 }
 
-static void spawn_beam(Game *g, const Tower *tower, const Enemy *enemy)
-{
-    int slot;
-    Beam *beam;
-    Vec2 from;
+/* ------------------------------------------------------------------ */
+/* towers and combat                                                  */
+/* ------------------------------------------------------------------ */
 
-    slot = -1;
-    for (int i = 0; i < MAX_BEAMS; ++i) {
-        if (!g->beams[i].active) {
-            slot = i;
-            break;
+/*
+ * Target selection (spec section 2): nearest enemy in range, except FIRE
+ * prefers enemies whose outer layer is HP, SHOCK prefers SHIELD and CORROSIVE
+ * prefers ARMOR; if none in range has the preferred outer layer, fall back to
+ * nearest. Ties go to the oldest enemy (lowest index in the array).
+ */
+static Enemy *find_target(Game *g, Vec2 centre, float range, int damageType)
+{
+    float rangeSq = range * range;
+    Enemy *nearest = NULL;
+    float nearestSq = rangeSq;
+    Enemy *preferred = NULL;
+    float preferredSq = rangeSq;
+    int preferredLayer = -1;
+    int i;
+
+    switch (damageType) {
+        case DMG_FIRE: preferredLayer = LAYER_HP; break;
+        case DMG_ELECTRIC: preferredLayer = LAYER_SHIELD; break;
+        case DMG_CORROSIVE: preferredLayer = LAYER_ARMOR; break;
+        default: preferredLayer = -1; break;
+    }
+
+    for (i = 0; i < MAX_ENEMIES; ++i) {
+        Enemy *e = &g->enemies[i];
+        float dx;
+        float dy;
+        float distSq;
+
+        if (!e->active || e->layerCount == 0) {
+            continue;
+        }
+        dx = e->x - centre.x;
+        dy = e->y - centre.y;
+        distSq = dx * dx + dy * dy;
+        if (distSq > rangeSq) {
+            continue;
+        }
+
+        /* Strict "<" so an equal-distance, older enemy wins the tie. */
+        if (nearest == NULL || distSq < nearestSq) {
+            nearest = e;
+            nearestSq = distSq;
+        }
+        if (preferredLayer >= 0 && e->layers[0].type == preferredLayer) {
+            if (preferred == NULL || distSq < preferredSq) {
+                preferred = e;
+                preferredSq = distSq;
+            }
         }
     }
-    if (slot < 0) {
-        return; /* purely cosmetic: dropping a beam is fine */
-    }
 
-    from = game_cell_center(tower->col, tower->row);
-    beam = &g->beams[slot];
-    beam->active = true;
-    beam->element = tower->element;
-    beam->x1 = from.x;
-    beam->y1 = from.y;
-    beam->x2 = enemy->x;
-    beam->y2 = enemy->y;
-    beam->life = CORE_BEAM_LIFE;
-    beam->maxLife = CORE_BEAM_LIFE;
+    return (preferred != NULL) ? preferred : nearest;
+}
+
+/* On-hit status effects (direct tower hits only; burn/acid ticks never retrigger). */
+static void apply_on_hit_effect(Game *g, Enemy *target, int damageType)
+{
+    switch (damageType) {
+        case DMG_FIRE:
+            if (target->burnStacks < (uint8_t)core_burn_max_stacks) {
+                ++target->burnStacks;
+            }
+            target->burnTimer = core_burn_duration;
+            break;
+        case DMG_ELECTRIC:
+            if (target->stunTimer < core_stun_duration) {
+                target->stunTimer = core_stun_duration;
+            }
+            break;
+        case DMG_CORROSIVE:
+            spawn_puddle(g, target->x, target->y);
+            break;
+        case DMG_SLAG:
+            target->slagTimer = core_slag_duration;
+            break;
+        default:
+            break;
+    }
 }
 
 static void update_towers(Game *g, float sdt)
@@ -353,14 +593,12 @@ static void update_towers(Game *g, float sdt)
 
     for (i = 0; i < g->towerCount; ++i) {
         Tower *tower = &g->towers[i];
+        const TowerSpec *spec;
         float damage;
         float fireRate;
         float range;
-        float rangeSq;
-        float bestDistSq;
         Vec2 centre;
         Enemy *target;
-        int j;
 
         if (!tower->active) {
             continue;
@@ -377,53 +615,58 @@ static void update_towers(Game *g, float sdt)
             continue;
         }
 
-        game_tower_stats(tower->element, tower->level, &damage, &fireRate,
-                         &range);
-        rangeSq = range * range;
-        bestDistSq = rangeSq;
-        target = NULL;
-        centre = game_cell_center(tower->col, tower->row);
-
-        /* Original targeting (main.lua:725-737): nearest enemy in range. */
-        for (j = 0; j < MAX_ENEMIES; ++j) {
-            Enemy *enemy = &g->enemies[j];
-            float dx;
-            float dy;
-            float distSq;
-
-            if (!enemy->active) {
-                continue;
-            }
-            dx = enemy->x - centre.x;
-            dy = enemy->y - centre.y;
-            distSq = dx * dx + dy * dy;
-            if (distSq > rangeSq) {
-                continue;
-            }
-            if (target == NULL || distSq < bestDistSq) {
-                target = enemy;
-                bestDistSq = distSq;
-            }
+        spec = game_tower_spec(tower->damageType);
+        if (!spec) {
+            continue;
         }
-
+        game_tower_stats(tower->damageType, tower->level, &damage, &fireRate,
+                         &range);
+        centre = game_cell_center(tower->col, tower->row);
+        target = find_target(g, centre, range, spec->damageType);
         if (target == NULL) {
             continue;
         }
 
         tower->cooldown = fireRate;
-        target->hp -= damage * game_damage_multiplier(tower->element,
-                                                      target->element);
-        target->hitFlash = CORE_HIT_FLASH_TIME;
-        spawn_beam(g, tower, target);
         g->events |= GAME_EVT_LASER;
 
-        if (target->hp <= 0.0f) {
-            target->active = false;
-            target->hp = 0.0f;
-            --g->enemiesAlive;
-            ++g->kills;
-            g->gold += CORE_KILL_REWARD;
-            g->events |= GAME_EVT_ENEMY_DIE;
+        if (spec->aoeRadius > 0.0f) {
+            /* BLASTER: pick a target, then hit everything near it. */
+            float radiusSq = spec->aoeRadius * spec->aoeRadius;
+            float tx = target->x;
+            float ty = target->y;
+            int j;
+
+            for (j = 0; j < MAX_ENEMIES; ++j) {
+                Enemy *e = &g->enemies[j];
+                float dx;
+                float dy;
+
+                if (!e->active) {
+                    continue;
+                }
+                dx = e->x - tx;
+                dy = e->y - ty;
+                if (dx * dx + dy * dy > radiusSq) {
+                    continue;
+                }
+                if (apply_damage(g, e, spec->damageType, damage)) {
+                    kill_enemy(g, e);
+                } else {
+                    e->hitFlash = CORE_HIT_FLASH_TIME;
+                }
+            }
+            spawn_beam(g, tower, tx, ty, 1, spec->aoeRadius);
+        } else {
+            bool died = apply_damage(g, target, spec->damageType, damage);
+
+            spawn_beam(g, tower, target->x, target->y, 0, 0.0f);
+            if (died) {
+                kill_enemy(g, target);
+            } else {
+                target->hitFlash = CORE_HIT_FLASH_TIME;
+                apply_on_hit_effect(g, target, spec->damageType);
+            }
         }
     }
 }
@@ -487,6 +730,10 @@ static void compact_enemies(Game *g)
     }
     g->enemiesAlive = write;
 }
+
+/* ------------------------------------------------------------------ */
+/* road (de)projection after the maze changes                         */
+/* ------------------------------------------------------------------ */
 
 /*
  * Road changes (build/sell) can leave every living enemy on a completely
@@ -593,13 +840,14 @@ void game_init(Game *g)
     g->totalWaves = CORE_TOTAL_WAVES;
     g->gold = STARTING_GOLD;
     g->lives = STARTING_LIVES;
-    g->selectedType = ELEMENT_FIRE;
+    g->selectedType = DMG_NORMAL;
     g->selectedTower = -1;
     g->speedMultiplier = 1.0f;
     g->cursorCol = 0;
     g->cursorRow = 0;
     g->rng = 0x2545F491u; /* any non-zero seed for the menu background */
     g->spawnInterval = core_wave_spawn_interval(1);
+    g->puddleNext = 0;
 }
 
 void game_new_run(Game *g, uint32_t seed)
@@ -615,6 +863,9 @@ void game_new_run(Game *g, uint32_t seed)
     g->gold = STARTING_GOLD;
     g->lives = STARTING_LIVES;
     g->speedMultiplier = 1.0f;
+    /* Kept as the run seed. Nothing consumes it during a run: enemy layer
+     * composition is a pure function of it (see core_enemy_layer_types), which
+     * is what lets game_wave_preview() be exact. */
     g->rng = (seed != 0u) ? seed : 0x9E3779B9u;
 
     /* On an empty board the BFS finds the straight row-12 corridor:
@@ -701,6 +952,7 @@ void game_step(Game *g, float dt)
     /* PHASE_WAVE */
     g->waveTime += sdt;
     update_spawning(g, sdt);
+    update_status_effects(g, sdt);
     if (!update_enemies(g, sdt)) {
         return; /* run ended during this step */
     }
@@ -781,7 +1033,7 @@ bool game_place_tower(Game *g, int col, int row)
     tower = &g->towers[index];
     memset(tower, 0, sizeof *tower);
     tower->active = true;
-    tower->element = (uint8_t)type;
+    tower->damageType = spec->damageType;
     tower->level = 1;
     tower->col = (int16_t)col;
     tower->row = (int16_t)row;

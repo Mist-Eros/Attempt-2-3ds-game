@@ -1,21 +1,22 @@
 /*
- * Elemental Defense - headless auto-play / balance sim.
+ * Elemental Defense - headless auto-play / balance sim (v0.3).
  *
  * Drives the real portable core (no rendering, no platform code) with a simple
  * greedy scripted player and prints one line per wave plus a final verdict.
  * This is the proof that the game loop is actually playable end to end.
  *
- * Two player styles:
+ * Player styles:
  *
- *   plain   - towers beside the road only (never on it), then upgrades. The
- *             road stays at its initial 25 segments, so this is the "ignore
- *             the maze mechanic" baseline.
- *   --maze  - before building/upgrading, spend gold on towers planted on the
- *             road itself, greedily picking the cell whose blocking lengthens
- *             the route the most. That is the intended way to play: every
- *             detour buys tower time, and the towers in the walls still shoot.
+ *   default / mixed - towers beside the road only (never on it), cycling all six
+ *                     damage types so the army covers HP / SHIELD / ARMOR, then
+ *                     upgrades. The road stays at its initial 25 segments.
+ *   --maze          - same mixed army, but first spends gold planting towers ON
+ *                     the road, greedily choosing the cell whose blocking
+ *                     lengthens the route the most (the intended play style).
+ *   --plain         - GUN towers only (neutral 1.0x vs every layer): the
+ *                     baseline that ignores the element system.
  *
- * Usage:  sim.exe [--maze] [seed]
+ * Usage:  sim.exe [--maze] [--plain] [seed]
  * Exit code is always 0; the verdict line says VICTORY / GAMEOVER.
  */
 #include <stdio.h>
@@ -42,8 +43,32 @@ typedef struct {
 static Spot g_spots[MAX_SPOTS];
 static int g_spotCount = 0;
 static int g_nextSpot = 0;
-static int g_nextType = 0;
+static int g_cycleIndex = 0;
 static int g_mazeMode = 0;
+static int g_plainMode = 0;
+
+/* Build order: mostly the four common elemental towers, with the odd SLAG
+ * (damage amplifier) and BLASTER (AoE). Repeats keep all layer types covered. */
+static const int kBuildCycle[] = {
+    DMG_NORMAL, DMG_FIRE, DMG_ELECTRIC, DMG_CORROSIVE,
+    DMG_FIRE, DMG_CORROSIVE, DMG_EXPLOSIVE, DMG_NORMAL,
+    DMG_ELECTRIC, DMG_SLAG, DMG_NORMAL, DMG_FIRE
+};
+
+static int next_build_type(void)
+{
+    int count = (int)(sizeof kBuildCycle / sizeof kBuildCycle[0]);
+    int type = kBuildCycle[g_cycleIndex % count];
+    ++g_cycleIndex;
+    return type;
+}
+
+/* Reset the AI build cycle between runs (main is one run per process anyway). */
+static void reset_ai(void)
+{
+    g_nextSpot = 0;
+    g_cycleIndex = 0;
+}
 
 /* Greedy "good spot" heuristic: how many CURRENT road cells are in range.
  * Road cells themselves are skipped here; --maze plants those separately. */
@@ -112,16 +137,15 @@ static int total_tower_levels(const Game *g)
     return sum;
 }
 
-static int highest_tower_level(const Game *g)
+/* Try to place a tower of `type` at (col,row); returns true on success. */
+static bool try_place(Game *g, int col, int row, int type)
 {
-    int i;
-    int best = 0;
-    for (i = 0; i < g->towerCount; ++i) {
-        if (g->towers[i].active && g->towers[i].level > best) {
-            best = g->towers[i].level;
-        }
+    const TowerSpec *spec = game_tower_spec(type);
+    if (!spec || g->gold < spec->cost) {
+        return false;
     }
-    return best;
+    game_set_selected_type(g, type);
+    return game_place_tower(g, col, row);
 }
 
 /*
@@ -160,12 +184,14 @@ static bool maze_plant_one(Game *g)
     if (bestCol < 0) {
         return false;
     }
-    game_set_selected_type(g, g_nextType);
-    if (!game_place_tower(g, bestCol, bestRow)) {
-        return false;
+    /* Mazes don't need the expensive BLASTER; use the next cheap mixed type. */
+    {
+        int type = next_build_type();
+        while (game_tower_spec(type) && game_tower_spec(type)->cost > g->gold) {
+            type = next_build_type();
+        }
+        return try_place(g, bestCol, bestRow, type);
     }
-    g_nextType = (g_nextType + 1) % TOWER_TYPE_COUNT;
-    return true;
 }
 
 static void ai_build_phase(Game *g)
@@ -174,7 +200,7 @@ static void ai_build_phase(Game *g)
 
     if (g_mazeMode) {
         for (guard = 0; guard < 400; ++guard) {
-            if (g->gold < 20 || g->towerCount >= MAZE_WALL_TARGET) {
+            if (g->gold < 15 || g->towerCount >= MAZE_WALL_TARGET) {
                 break;
             }
             if (!maze_plant_one(g)) {
@@ -188,7 +214,7 @@ static void ai_build_phase(Game *g)
         int col;
         int row;
 
-        if (g->towerCount >= SUPPORT_TOWER_TARGET || g->gold < 20 ||
+        if (g->towerCount >= SUPPORT_TOWER_TARGET || g->gold < 15 ||
             g_nextSpot >= g_spotCount) {
             break;
         }
@@ -198,13 +224,13 @@ static void ai_build_phase(Game *g)
             ++g_nextSpot; /* the maze has grown over this spot */
             continue;
         }
-        game_set_selected_type(g, g_nextType);
-        if (!game_can_place_at(g, col, row, g_nextType) ||
-            !game_place_tower(g, col, row)) {
-            ++g_nextSpot;
-            continue;
+        {
+            int type = g_plainMode ? DMG_NORMAL : next_build_type();
+            if (!try_place(g, col, row, type)) {
+                ++g_nextSpot;
+                continue;
+            }
         }
-        g_nextType = (g_nextType + 1) % TOWER_TYPE_COUNT;
         ++g_nextSpot;
     }
 
@@ -238,6 +264,14 @@ static void ai_build_phase(Game *g)
     game_clear_message(g);
 }
 
+static const char *mode_name(void)
+{
+    if (g_plainMode) {
+        return "plain-gun";
+    }
+    return g_mazeMode ? "maze-mixed" : "mixed";
+}
+
 int main(int argc, char **argv)
 {
     Game g;
@@ -252,6 +286,8 @@ int main(int argc, char **argv)
     for (argi = 1; argi < argc; ++argi) {
         if (strcmp(argv[argi], "--maze") == 0) {
             g_mazeMode = 1;
+        } else if (strcmp(argv[argi], "--plain") == 0) {
+            g_plainMode = 1;
         } else {
             seed = (unsigned)strtoul(argv[argi], NULL, 10);
             if (seed == 0u) {
@@ -260,30 +296,41 @@ int main(int argc, char **argv)
         }
     }
 
+    reset_ai();
     game_new_run(&g, (uint32_t)seed);
     collect_spots(&g);
     waveCount = g.totalWaves;
     cpuStart = clock();
 
-    printf("Elemental Defense - headless balance sim\n");
+    printf("Elemental Defense - headless balance sim (v0.3)\n");
     printf("mode=%s  seed=%u  SPEED_SCALE=%.2f  support spots=%d  waves=%d\n\n",
-           g_mazeMode ? "maze" : "plain", seed,
-           (double)core_enemy_speed_scale(), g_spotCount, waveCount);
-    printf("%4s | %5s | %5s | %5s | %5s | %6s | %4s | %6s | %8s\n", "wave",
-           "gold", "lives", "kills", "leaks", "towers", "lvlsum", "topLvl",
-           "pathLen");
+           mode_name(), seed, (double)core_enemy_speed_scale(), g_spotCount,
+           waveCount);
+    printf("%4s | %5s | %5s | %5s | %5s | %6s | %4s | %3s | %3s | %3s | %3s | %5s\n",
+           "wave", "gold", "lives", "kills", "leaks", "towers", "lvlsum",
+           "HP", "SH", "AR", "EL", "pathLen");
+    printf("%4s | %5s | %5s | %5s | %5s | %6s | %4s | %3s | %3s | %3s | %3s | %5s\n",
+           "", "", "", "", "", "", "", "lay", "lay", "lay", "ite", "");
 
     for (guard = 0; guard < MAX_SIM_STEPS; ++guard) {
         if (g.phase == PHASE_VICTORY || g.phase == PHASE_GAMEOVER) {
             break;
         }
         if (g.phase == PHASE_BUILD) {
+            int hpLayers = 0;
+            int shieldLayers = 0;
+            int armorLayers = 0;
+            int elites = 0;
+
             ai_build_phase(&g);
             if (g.wave != lastPrintedWave) {
-                printf("%4d | %5d | %5d | %5d | %5d | %6d | %4d | %6d | %8.1f\n",
+                game_wave_preview(&g, &hpLayers, &shieldLayers, &armorLayers,
+                                  &elites);
+                printf("%4d | %5d | %5d | %5d | %5d | %6d | %4d | %3d | %3d | %3d | %3d | %5.1f\n",
                        g.wave, g.gold, g.lives, g.kills, g.leaks,
-                       g.towerCount, total_tower_levels(&g),
-                       highest_tower_level(&g), (double)g.path.length);
+                       g.towerCount, total_tower_levels(&g), hpLayers,
+                       shieldLayers, armorLayers, elites,
+                       (double)g.path.length);
                 lastPrintedWave = g.wave;
             }
             game_start_next_wave(&g);
@@ -305,19 +352,30 @@ int main(int argc, char **argv)
     {
         int towerCount = g.towerCount;
         int levels = total_tower_levels(&g);
-        int best = highest_tower_level(&g);
         double simSeconds = (double)g.timeTotal;
         double cpuSeconds = (double)(clock() - cpuStart) / (double)CLOCKS_PER_SEC;
+        int typeCounts[TOWER_TYPE_COUNT] = { 0, 0, 0, 0, 0, 0 };
+        int i;
+
+        for (i = 0; i < towerCount; ++i) {
+            if (g.towers[i].active &&
+                g.towers[i].damageType < TOWER_TYPE_COUNT) {
+                ++typeCounts[g.towers[i].damageType];
+            }
+        }
 
         printf("waves reached : %d/%d\n", (g.wave > waveCount) ? waveCount
                                                                 : g.wave,
                waveCount);
         printf("gold          : %d\n", g.gold);
         printf("lives         : %d/%d\n", g.lives, STARTING_LIVES);
-        printf("kills         : %d\n", g.kills);
-        printf("leaks         : %d\n", g.leaks);
-        printf("towers        : %d (level sum %d, best level %d)\n", towerCount,
-               levels, best);
+        printf("kills/leaks   : %d / %d\n", g.kills, g.leaks);
+        printf("towers        : %d (level sum %d)\n", towerCount, levels);
+        printf("army          : GUN %d, FIRE %d, SHOCK %d, CORROSIVE %d, "
+               "SLAG %d, BLASTER %d\n",
+               typeCounts[DMG_NORMAL], typeCounts[DMG_FIRE],
+               typeCounts[DMG_ELECTRIC], typeCounts[DMG_CORROSIVE],
+               typeCounts[DMG_SLAG], typeCounts[DMG_EXPLOSIVE]);
         printf("final road    : %.0f cells\n", (double)g.path.length);
         printf("sim time      : %.1f s over %d fixed steps\n", simSeconds,
                steps);
