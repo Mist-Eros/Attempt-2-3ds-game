@@ -13,6 +13,13 @@
  *
  * Coordinates: col 0..GRID_COLS-1 (left to right), row 0..GRID_ROWS-1 (top to
  * bottom). Cell (col,row) center is (col + 0.5, row + 0.5).
+ *
+ * v0.3 combat model (Borderlands 2 style):
+ *   - enemies are stacks of 1..3 concentric layers, each layer is one of
+ *     HP (red), SHIELD (blue) or ARMOR (yellow); layers are destroyed outside-in
+ *   - towers deal one of six damage types: normal, fire, electric, corrosive,
+ *     slag, explosive; each type has its own multipliers vs layer types and
+ *     its own status effect
  */
 #ifndef GAME_H
 #define GAME_H
@@ -23,8 +30,13 @@
 #define GRID_COLS 26
 #define GRID_ROWS 13
 #define MAX_PATH_CELLS (GRID_COLS * GRID_ROWS)
-#define TOWER_TYPE_COUNT 3
+
+/* one per damage type below */
+#define TOWER_TYPE_COUNT 6
 #define TOWER_MAX_LEVEL 10
+
+#define MAX_LAYERS 3
+#define MAX_PUDDLES 16
 
 #define MAX_TOWERS 96
 #define MAX_ENEMIES 128
@@ -36,11 +48,21 @@
 
 #define MAX_MESSAGE_LEN 48
 
+/* what a tower's shots are made of */
 typedef enum {
-    ELEMENT_FIRE = 0,
-    ELEMENT_WATER = 1,
-    ELEMENT_FOREST = 2
-} Element;
+    DMG_NORMAL = 0,     /* same damage to every layer type */
+    DMG_FIRE,           /* strong vs HP, weak otherwise; stacking burn DoT */
+    DMG_ELECTRIC,       /* strong vs SHIELD, weak otherwise; brief stun */
+    DMG_CORROSIVE,      /* strong vs ARMOR, weak otherwise; acid puddle on the ground */
+    DMG_SLAG,           /* low damage; target takes +50% damage and is slowed */
+    DMG_EXPLOSIVE       /* normal damage to every layer, but AoE and 3x slower */
+} DamageType;
+
+typedef enum {
+    LAYER_HP = 0,       /* red   */
+    LAYER_SHIELD,       /* blue  */
+    LAYER_ARMOR         /* yellow */
+} LayerType;
 
 typedef enum {
     PHASE_MENU = 0,     /* title screen */
@@ -61,7 +83,7 @@ typedef struct {
 
 typedef struct {
     bool active;
-    uint8_t element;    /* Element */
+    uint8_t damageType; /* DamageType */
     uint8_t level;      /* 1..TOWER_MAX_LEVEL */
     int16_t col, row;
     float cooldown;     /* seconds until the next shot */
@@ -69,23 +91,50 @@ typedef struct {
     float animPhase;    /* idle animation timer, renderer may use */
 } Tower;
 
+/* one concentric ring of an enemy */
+typedef struct {
+    uint8_t type;       /* LayerType */
+    float hp;
+    float maxHp;
+} EnemyLayer;
+
 typedef struct {
     bool active;
-    uint8_t element;    /* Element */
     bool elite;
-    float hp, maxHp;
-    float pathPos;      /* distance travelled along the path, in cells */
-    float x, y;         /* cell-space position (derived from pathPos) */
-    float hitFlash;     /* seconds of white flash left after damage */
+    uint8_t layerCount;             /* 1..MAX_LAYERS, [0] is the outermost */
+    EnemyLayer layers[MAX_LAYERS];
+    float pathPos;                  /* distance travelled along the path, in cells */
+    float x, y;                     /* cell-space position (derived from pathPos) */
+    float hitFlash;                 /* seconds of white flash left after damage */
+
+    /* status effects */
+    uint8_t burnStacks;             /* fire: 0..CORE_BURN_MAX_STACKS */
+    float burnTimer;
+    float stunTimer;                /* electric: movement fully stopped */
+    float slagTimer;                /* slag: +damage taken, slower movement */
 } Enemy;
 
-/* Instant-hit "laser" visual, like the original LÖVE version. */
+/*
+ * Instant-hit shot visual. kind 0 = beam from tower to target, kind 1 =
+ * explosion ring centred on (x2,y2) (explosive towers only).
+ */
 typedef struct {
     bool active;
-    uint8_t element;
-    float x1, y1, x2, y2;   /* cell space */
-    float life, maxLife;    /* seconds */
+    uint8_t damageType;             /* DamageType */
+    uint8_t kind;
+    float x1, y1, x2, y2;           /* cell space */
+    float radius;                   /* explosion radius for kind 1, cells */
+    float life, maxLife;            /* seconds */
 } Beam;
+
+/* corrosive acid puddle on the ground */
+typedef struct {
+    bool active;
+    float x, y;                     /* cell space centre */
+    float radius;                   /* cells */
+    float life, maxLife;
+    float dps;
+} Puddle;
 
 typedef struct {
     Vec2 pts[MAX_PATH_CELLS];
@@ -125,6 +174,8 @@ typedef struct {
     /* dynamic entities */
     Enemy enemies[MAX_ENEMIES];
     Beam beams[MAX_BEAMS];
+    Puddle puddles[MAX_PUDDLES];
+    int puddleNext;                         /* round-robin replacement slot */
 
     /* wave spawning internals */
     float spawnTimer;
@@ -134,7 +185,7 @@ typedef struct {
     int eliteDelayCount;
 
     /* player selection / controls */
-    int selectedType;       /* tower type selected in the build palette */
+    int selectedType;       /* damage-type tower selected in the build palette */
     int selectedTower;      /* tower index or -1 */
     int cursorCol, cursorRow;   /* D-pad cursor */
 
@@ -144,7 +195,6 @@ typedef struct {
     uint32_t rng;           /* deterministic xorshift state */
 
     /*
-     * --- appended by the core (never reorder existing fields!) ---
      * Leftover real time that game_update() has not turned into fixed steps
      * yet. Kept in the struct (instead of a static) so two Game instances in
      * the same process never share simulation state - the host tests rely on
@@ -153,30 +203,26 @@ typedef struct {
     float stepAccumulator;
 
     /*
-     * Remaining regular-enemy element quota for the wave being spawned
-     * (indexed by Element: fire, water, forest). Waves spawn exact quotas
-     * instead of the original game's pure random rolls, so the bottom-screen
-     * preview is truthful; the spawn ORDER is still shuffled by the RNG.
+     * Remaining layer-type quota for the wave being spawned (indexed by
+     * LayerType). Waves spawn an exact number of HP / SHIELD / ARMOR layers
+     * instead of pure random rolls, so the bottom-screen preview is truthful;
+     * the spawn order is still shuffled by the RNG.
      */
-    uint8_t spawnQuota[TOWER_TYPE_COUNT];
+    uint8_t layerQuota[3];
 } Game;
 
-/* ---- content tables (implemented in the core) ---- */
+/* ---- content table (implemented in the core) ---- */
 typedef struct {
     const char *name;
     int cost;
     float damage;       /* level 1 */
     float fireRate;     /* seconds between shots, level 1 */
     float range;        /* cells, level 1 */
+    uint8_t damageType; /* DamageType */
+    float aoeRadius;    /* cells; 0 = single target */
     float color[3];
     float glow[3];
 } TowerSpec;
-
-typedef struct {
-    const char *name;
-    float color[3];
-    float glow[3];
-} EnemySpec;
 
 /* bits for Game.events */
 enum {
@@ -212,7 +258,6 @@ void game_clear_message(Game *g);
 
 /* ---- queries for UI / renderer ---- */
 const TowerSpec *game_tower_spec(int type);
-const EnemySpec *game_enemy_spec(int element);
 
 /* effective stats at a given level (level clamped 1..TOWER_MAX_LEVEL) */
 void game_tower_stats(int type, int level,
@@ -223,18 +268,18 @@ int game_sell_value(const Game *g, int towerIndex);
 int game_tower_at(const Game *g, int col, int row);     /* tower index or -1 */
 bool game_can_place_at(const Game *g, int col, int row, int type);
 
-/* what the upcoming wave will throw at you (for the bottom-screen preview) */
-void game_wave_preview(const Game *g, int *fire, int *water, int *forest, int *elite);
-
-/* ---- appended content queries (append-only additions, see core/NOTES.md) ---- */
+/*
+ * What the upcoming wave will throw at you: total number of HP / SHIELD /
+ * ARMOR layers across all spawns (elites included), plus the elite count.
+ */
+void game_wave_preview(const Game *g, int *hpLayers, int *shieldLayers,
+                       int *armorLayers, int *elites);
 
 /*
- * Damage multiplier of a tower type against an enemy element.
- * The matrix is not symmetric: fire melts forest but is weak to water.
- * type/element values outside 0..2 are clamped to 0.
- * Result is 2.0, 1.0 or 0.5.
+ * Damage multiplier of a damage type against a layer type. 2.0 = strong,
+ * 1.0 = neutral, 0.5 = weak. Out-of-range values are clamped to 0.
  */
-float game_damage_multiplier(int towerType, int enemyElement);
+float game_damage_multiplier(int damageType, int layerType);
 
 float game_path_length(const Game *g);      /* in cells */
 Vec2 game_cell_center(int col, int row);    /* cell-space center */
