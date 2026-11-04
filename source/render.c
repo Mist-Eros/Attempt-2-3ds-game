@@ -110,122 +110,309 @@ void text_right(float rightX, float y, float scale, GfxColor color, const char *
 }
 
 /* ------------------------------------------------------------------------ */
-/* Tower damage-type glyphs (docs/elements-spec.md §3)                      */
+/* Comic menu dressing                                                       */
 /* ------------------------------------------------------------------------ */
 
-/* GUN (normal): a fat grey bullet with a dark driving band. */
-static void icon_gun(float cx, float cy, float size, GfxColor color)
+/* Borderlands-ish title lettering: near-black 8-direction outline + drop
+ * shadow, then the fill.  ~10 text passes; only ever used on the light menu
+ * screens (the citro2d budget is 16k objects, a menu frame is ~3-6k). */
+void text_comic_centered(float cx, float y, float scale, GfxColor fill,
+                         const char *text)
 {
-    float s = size;
+    static const int offsets[8][2] = {
+        { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
+        { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 }
+    };
+    float thick = scale >= 3.0f ? 2.0f : 1.0f;
+    int i;
 
+    /* drop shadow first, then the outline, then the fill on top */
+    text_centered(cx + thick * 2.0f, y + thick * 2.0f, scale,
+                  rgba(0.0f, 0.0f, 0.0f, 0.55f), text);
+    for (i = 0; i < 8; i++) {
+        text_centered(cx + (float)offsets[i][0] * thick,
+                      y + (float)offsets[i][1] * thick, scale, COL_MENU_INK, text);
+    }
+    text_centered(cx, y, scale, fill, text);
+}
+
+/* Yellow/black diagonal hazard-stripe block (BL2 button ends). */
+void art_hazard_strip(float x, float y, float w, float h)
+{
+    static const GfxColor kBlack = { 0.03f, 0.03f, 0.05f, 1.0f };
+    static const GfxColor kYellow = { 1.00f, 0.82f, 0.10f, 1.0f };
+    int rows = (int)h;
+    int row;
+    int span = (int)(w + h) / 8 + 2;
+
+    gfx_fill_rect(x, y, w, h, kBlack);
+    for (row = 0; row < rows; row++) {
+        int k;
+
+        for (k = -1; k <= span; k++) {
+            float sx = x + (float)k * 8.0f + (float)row;
+            float x0 = sx;
+            float x1 = sx + 4.0f;
+
+            if (x0 < x)
+                x0 = x;
+            if (x1 > x + w)
+                x1 = x + w;
+            if (x1 > x0)
+                gfx_fill_rect(floorf(x0), y + (float)row, x1 - x0, 1.0f, kYellow);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Borderlands-style weapon emblems                                          */
+/*                                                                           */
+/* Original pixel art drawn from scratch in the BL2 emblem silhouettes (the  */
+/* reference PNGs in _refs/elements/ were only used as shape references; no  */
+/* image data is copied or embedded).  Two detail levels are chosen by size: */
+/*   size >= 8  -> detailed (menu), else simplified (palette / board / panel)*/
+/* ------------------------------------------------------------------------ */
+
+#define EMBLEM_TWO_PI 6.28318530718f
+
+/* GUN: grey bullet with a dark driving band (same at both detail levels). */
+static void emblem_gun(float cx, float cy, float s, GfxColor color, GfxColor dark)
+{
     gfx_fill_rect(cx - s * 0.85f, cy - s * 0.32f, s * 1.25f, s * 0.64f, color);
     gfx_fill_triangle(cx + s * 0.40f, cy - s * 0.32f, cx + s * 0.95f, cy,
                       cx + s * 0.40f, cy + s * 0.32f, color);
     gfx_fill_rect(cx - s * 0.85f, cy - s * 0.32f, s * 0.55f, s * 0.24f,
                   rgba(1.0f, 1.0f, 1.0f, 0.35f));
-    gfx_fill_rect(cx - s * 0.30f, cy - s * 0.32f, s * 0.16f, s * 0.64f,
-                  rgba(0.16f, 0.16f, 0.20f, 0.85f));
+    gfx_fill_rect(cx - s * 0.30f, cy - s * 0.32f, s * 0.16f, s * 0.64f, dark);
 }
 
-/* FIRE: the original LÖVE2D flame polygon, kept for continuity. */
-static void icon_fire(float cx, float cy, float size, GfxColor color)
+/* FIRE / incendiary: organic flame silhouette with side tongues and the
+ * candle-flame inner notch (dark inner flame), plus a hot core. */
+static void emblem_fire(float cx, float cy, float s, GfxColor color, GfxColor dark)
 {
-    float w = size * 0.8f;
+    float mainX[6] = { cx, cx + s * 0.55f, cx + s * 0.30f,
+                       cx, cx - s * 0.30f, cx - s * 0.55f };
+    float mainY[6] = { cy - s, cy + s * 0.05f, cy + s * 0.85f,
+                       cy + s * 0.55f, cy + s * 0.85f, cy + s * 0.05f };
+    float innerX[3] = { cx, cx + s * 0.18f, cx - s * 0.18f };
+    float innerY[3] = { cy + s * 0.90f, cy + s * 0.40f, cy + s * 0.40f };
+    float coreX[3] = { cx, cx + s * 0.10f, cx - s * 0.10f };
+    float coreY[3] = { cy - s * 0.45f, cy + s * 0.25f, cy + s * 0.25f };
+
+    poly_fill(mainX, mainY, 6, color);
+    /* side tongues (two extra flames leaning outward) */
+    gfx_fill_triangle(cx - s * 0.50f, cy + s * 0.05f, cx - s * 0.98f,
+                      cy + s * 0.28f, cx - s * 0.30f, cy + s * 0.78f, color);
+    gfx_fill_triangle(cx + s * 0.50f, cy + s * 0.05f, cx + s * 0.98f,
+                      cy + s * 0.28f, cx + s * 0.30f, cy + s * 0.78f, color);
+    poly_fill(innerX, innerY, 3, dark);
+    poly_fill(coreX, coreY, 3, rgba(1.0f, 0.72f, 0.18f, 0.85f));
+}
+
+/* FIRE small: simple candle flame (the shape from the old glyph, kept). */
+static void emblem_fire_small(float cx, float cy, float s, GfxColor color)
+{
+    float w = s * 0.8f;
     float xs[6] = { cx, cx - w, cx - w * 0.3f, cx, cx + w * 0.3f, cx + w };
-    float ys[6] = { cy - size, cy + size * 0.6f, cy + size * 0.2f,
-                    cy + size * 0.8f, cy + size * 0.2f, cy + size * 0.6f };
-    float hx[6] = { cx, cx - w * 0.4f, cx - w * 0.1f, cx,
-                    cx + w * 0.1f, cx + w * 0.4f };
-    float hy[6] = { cy - size * 0.6f, cy + size * 0.3f, cy + size * 0.1f,
-                    cy + size * 0.4f, cy + size * 0.1f, cy + size * 0.3f };
+    float ys[6] = { cy - s, cy + s * 0.6f, cy + s * 0.2f,
+                    cy + s * 0.8f, cy + s * 0.2f, cy + s * 0.6f };
 
     poly_fill(xs, ys, 6, color);
-    poly_fill(hx, hy, 6, rgba(1.0f, 1.0f, 1.0f, 0.22f));
 }
 
-/* SHOCK (electric): a Z-shaped lightning bolt. */
-static void icon_shock(float cx, float cy, float size, GfxColor color)
+/* SHOCK: one lightning bolt, optionally rotated, used 1x (small) or 3x (big). */
+static void draw_bolt_shape(float cx, float cy, float s, float angle, GfxColor color)
 {
-    float s = size;
-    float xs[6] = { cx + s * 0.30f, cx - s * 0.70f, cx - s * 0.08f,
-                    cx - s * 0.35f, cx + s * 0.70f, cx + s * 0.08f };
-    float ys[6] = { cy - s, cy + s * 0.12f, cy + s * 0.12f,
-                    cy + s, cy - s * 0.12f, cy - s * 0.12f };
-    float hx[4] = { cx + s * 0.05f, cx - s * 0.28f, cx - s * 0.02f, cx - s * 0.16f };
-    float hy[4] = { cy - s * 0.62f, cy - s * 0.02f, cy - s * 0.02f, cy + s * 0.55f };
+    static const float bx[6] = { 0.00f, -0.62f, -0.16f, -0.34f, 0.62f, 0.18f };
+    static const float by[6] = { -1.00f, 0.12f, 0.12f, 1.00f, -0.12f, -0.12f };
+    float ca = cosf(angle);
+    float sa = sinf(angle);
+    float xs[6];
+    float ys[6];
+    int i;
 
+    for (i = 0; i < 6; i++) {
+        xs[i] = cx + (bx[i] * ca - by[i] * sa) * s;
+        ys[i] = cy + (bx[i] * sa + by[i] * ca) * s;
+    }
     poly_fill(xs, ys, 6, color);
-    poly_fill(hx, hy, 4, rgba(1.0f, 1.0f, 1.0f, 0.30f));
 }
 
-/* CORROSIVE: a dripping acid blob. */
-static void icon_corrosive(float cx, float cy, float size, GfxColor color)
+/* SHOCK big: three bolts fanning out (big centre + two smaller side bolts). */
+static void emblem_shock(float cx, float cy, float s, GfxColor color, GfxColor light)
 {
-    float s = size;
-
-    gfx_fill_circle(cx, cy + s * 0.12f, s * 0.66f, color);
-    gfx_fill_circle(cx - s * 0.38f, cy - s * 0.34f, s * 0.28f, color);
-    gfx_fill_triangle(cx - s * 0.34f, cy + s * 0.42f, cx + s * 0.34f,
-                      cy + s * 0.42f, cx, cy + s * 1.05f, color);
-    gfx_fill_circle(cx - s * 0.18f, cy - s * 0.02f, s * 0.20f,
-                    rgba(1.0f, 1.0f, 1.0f, 0.28f));
-    gfx_fill_circle(cx + s * 0.34f, cy + s * 0.30f, s * 0.13f,
-                    rgba(0.10f, 0.28f, 0.04f, 0.55f));
+    draw_bolt_shape(cx - s * 0.66f, cy + s * 0.34f, s * 0.52f, -0.55f, color);
+    draw_bolt_shape(cx + s * 0.66f, cy + s * 0.34f, s * 0.52f, 0.55f, color);
+    draw_bolt_shape(cx, cy - s * 0.10f, s * 0.98f, 0.0f, color);
+    /* hot core streak on the centre bolt */
+    draw_bolt_shape(cx, cy - s * 0.10f, s * 0.42f, 0.0f, light);
 }
 
-/* SLAG (purple): a crystal shard. */
-static void icon_slag(float cx, float cy, float size, GfxColor color)
+/* CORROSIVE big: bright biohazard trefoil over a dark-green ring/disc. */
+static void emblem_corrosive(float cx, float cy, float s, GfxColor color, GfxColor ring)
 {
-    float s = size;
-    float xs[4] = { cx, cx + s * 0.64f, cx, cx - s * 0.64f };
-    float ys[4] = { cy - s, cy, cy + s, cy };
-    float hx[3] = { cx, cx + s * 0.30f, cx + s * 0.02f };
-    float hy[3] = { cy - s * 0.55f, cy - s * 0.05f, cy + s * 0.45f };
+    int k;
 
-    poly_fill(xs, ys, 4, color);
-    poly_fill(hx, hy, 3, rgba(1.0f, 1.0f, 1.0f, 0.30f));
+    gfx_fill_circle(cx, cy, s * 0.94f, rgba(ring.r, ring.g, ring.b, 0.35f));
+    gfx_outline_circle(cx, cy, s * 0.94f, s * 0.16f, ring);
+
+    for (k = 0; k < 3; k++) {
+        float a = -1.57079632679f + (float)k * (EMBLEM_TWO_PI / 3.0f);
+        float lx = cx + cosf(a) * s * 0.42f;
+        float ly = cy + sinf(a) * s * 0.42f;
+
+        gfx_fill_circle(lx, ly, s * 0.28f, color);
+        gfx_fill_triangle(lx + cosf(a) * s * 0.52f, ly + sinf(a) * s * 0.52f,
+                          lx - s * 0.20f, ly - s * 0.08f,
+                          lx + s * 0.20f, ly - s * 0.08f, color);
+    }
+    /* central hole makes it read as a trefoil rather than a blob */
+    gfx_fill_circle(cx, cy, s * 0.18f, ring);
 }
 
-/* BLASTER (explosive): a round bomb with a lit fuse. */
-static void icon_blaster(float cx, float cy, float size, GfxColor color)
+/* CORROSIVE small: dark ring + 3 bright dots. */
+static void emblem_corrosive_small(float cx, float cy, float s, GfxColor color,
+                                   GfxColor ring)
 {
-    float s = size;
-    GfxColor body = { 0.22f, 0.20f, 0.26f, 1.0f };
-    GfxColor fuse = { 0.78f, 0.72f, 0.60f, 1.0f };
+    int k;
 
-    gfx_fill_circle(cx, cy + s * 0.14f, s * 0.70f, body);
-    gfx_fill_circle(cx - s * 0.24f, cy - s * 0.10f, s * 0.22f,
-                    rgba(1.0f, 1.0f, 1.0f, 0.16f));
-    gfx_fill_rect(cx - s * 0.10f, cy - s * 0.86f, s * 0.20f, s * 0.26f, fuse);
-    gfx_fill_rect(cx + s * 0.02f, cy - s * 1.02f, s * 0.34f, s * 0.14f, fuse);
-    gfx_fill_circle(cx + s * 0.44f, cy - s * 0.96f, s * 0.15f, color);
+    gfx_outline_circle(cx, cy, s * 0.88f, 1.0f, ring);
+    for (k = 0; k < 3; k++) {
+        float a = -1.57079632679f + (float)k * (EMBLEM_TWO_PI / 3.0f);
+
+        gfx_fill_circle(cx + cosf(a) * s * 0.42f, cy + sinf(a) * s * 0.42f,
+                        s * 0.26f, color);
+    }
 }
 
-void art_tower_icon(float cx, float cy, float size, int damageType)
+/* SLAG big: the purple 3-crest wave squiggle (thick polyline + hot core). */
+static void emblem_slag(float cx, float cy, float s, GfxColor color, GfxColor light)
 {
-    GfxColor color = art_damage_color(damageType, 1.0f);
+    static const float wx[7] = { -0.95f, -0.63f, -0.32f, 0.00f,
+                                 0.32f, 0.63f, 0.95f };
+    static const float wy[7] = { -0.24f, 0.26f, -0.26f, 0.24f,
+                                 -0.26f, 0.26f, -0.24f };
+    int i;
+
+    for (i = 0; i < 6; i++) {
+        gfx_line(cx + wx[i] * s, cy + wy[i] * s, cx + wx[i + 1] * s,
+                 cy + wy[i + 1] * s, s * 0.30f, color);
+    }
+    for (i = 0; i < 6; i++) {
+        gfx_line(cx + wx[i] * s, cy + wy[i] * s, cx + wx[i + 1] * s,
+                 cy + wy[i + 1] * s, s * 0.12f, light);
+    }
+}
+
+/* SLAG small: 3-segment wave. */
+static void emblem_slag_small(float cx, float cy, float s, GfxColor color)
+{
+    gfx_line(cx - s * 0.90f, cy + s * 0.25f, cx - s * 0.30f, cy - s * 0.30f,
+             s * 0.55f, color);
+    gfx_line(cx - s * 0.30f, cy - s * 0.30f, cx + s * 0.30f, cy + s * 0.30f,
+             s * 0.55f, color);
+    gfx_line(cx + s * 0.30f, cy + s * 0.30f, cx + s * 0.90f, cy - s * 0.25f,
+             s * 0.55f, color);
+}
+
+/* EXPLOSIVE: comic starburst.  spikes=7 gold-on-orange (big) or 4 (small). */
+static void draw_star_burst(float cx, float cy, float outer, float inner, int spikes,
+                            GfxColor color)
+{
+    float xs[16];
+    float ys[16];
+    int i;
+    int n = spikes * 2;
+
+    if (n > 16)
+        n = 16;
+    for (i = 0; i < n; i++) {
+        float a = -1.57079632679f + (float)i * (EMBLEM_TWO_PI / (float)n);
+        float r = (i % 2 == 0) ? outer : inner;
+
+        xs[i] = cx + cosf(a) * r;
+        ys[i] = cy + sinf(a) * r;
+    }
+    poly_fill(xs, ys, n, color);
+}
+
+static void emblem_explosive(float cx, float cy, float s, GfxColor color, GfxColor dark)
+{
+    draw_star_burst(cx + s * 0.10f, cy + s * 0.12f, s * 1.04f, s * 0.46f, 7, dark);
+    draw_star_burst(cx, cy, s * 0.92f, s * 0.40f, 7, color);
+    gfx_fill_circle(cx, cy, s * 0.20f, rgba(1.0f, 0.98f, 0.72f, 0.95f));
+}
+
+static void emblem_explosive_small(float cx, float cy, float s, GfxColor color,
+                                   GfxColor dark)
+{
+    draw_star_burst(cx + s * 0.10f, cy + s * 0.12f, s * 0.70f, s * 0.30f, 3, dark);
+    draw_star_burst(cx, cy, s * 0.82f, s * 0.26f, 4, color);
+}
+
+void art_weapon_emblem(float cx, float cy, float size, int damageType)
+{
+    GfxColor color;
+    GfxColor dark;
+    bool detailed;
+
+    if (damageType < 0)
+        damageType = 0;
+    if (damageType >= TOWER_TYPE_COUNT)
+        damageType = TOWER_TYPE_COUNT - 1;
+    color = COL_EMBLEM[damageType];
+    dark = COL_EMBLEM_DARK[damageType];
+    detailed = size >= 8.0f;
 
     switch (damageType) {
     case DMG_FIRE:
-        icon_fire(cx, cy, size, color);
+        if (detailed)
+            emblem_fire(cx, cy, size, color, dark);
+        else
+            emblem_fire_small(cx, cy, size, color);
         break;
     case DMG_ELECTRIC:
-        icon_shock(cx, cy, size, color);
+        if (detailed)
+            emblem_shock(cx, cy, size, color, dark);
+        else
+            draw_bolt_shape(cx, cy, size, 0.0f, color);
         break;
     case DMG_CORROSIVE:
-        icon_corrosive(cx, cy, size, color);
+        if (detailed)
+            emblem_corrosive(cx, cy, size, color, dark);
+        else
+            emblem_corrosive_small(cx, cy, size, color, dark);
         break;
     case DMG_SLAG:
-        icon_slag(cx, cy, size, color);
+        if (detailed)
+            emblem_slag(cx, cy, size, color, dark);
+        else
+            emblem_slag_small(cx, cy, size, color);
         break;
     case DMG_EXPLOSIVE:
-        icon_blaster(cx, cy, size, color);
+        if (detailed)
+            emblem_explosive(cx, cy, size, color, dark);
+        else
+            emblem_explosive_small(cx, cy, size, color, dark);
         break;
     case DMG_NORMAL:
     default:
-        icon_gun(cx, cy, size, color);
+        emblem_gun(cx, cy, size, color, dark);
         break;
     }
+}
+
+GfxColor art_emblem_color(int damageType, float alpha)
+{
+    GfxColor c;
+
+    if (damageType < 0)
+        damageType = 0;
+    if (damageType >= TOWER_TYPE_COUNT)
+        damageType = TOWER_TYPE_COUNT - 1;
+    c = COL_EMBLEM[damageType];
+    c.a = alpha;
+    return c;
 }
 
 GfxColor art_damage_color(int damageType, float alpha)
@@ -350,17 +537,82 @@ void render_background_gradient(int width, int height)
 /* Title screen                                                              */
 /* ------------------------------------------------------------------------ */
 
-void render_menu_top(const App *app)
+/* ------------------------------------------------------------------------ */
+/* Title screen                                                              */
+/* ------------------------------------------------------------------------ */
+
+/* Faint BL2-style title-screen backdrop: big diagonal hazard bands drifting
+ * behind everything plus a huge ring watermark.  The global vertical gradient
+ * underneath already provides the near-black navy base. */
+static void draw_menu_background(const App *app)
 {
-    static const GfxColor kShadow = { 0.25f, 0.15f, 0.03f, 0.9f };
-    static const GfxColor kDefenseShadow = { 0.20f, 0.20f, 0.35f, 0.55f };
-    static const GfxColor kDivider = { 0.30f, 0.20f, 0.10f, 0.5f };
-    float pulse;
-    float width;
-    float x;
     int i;
 
-    /* drifting element motes */
+    for (i = 0; i < 3; i++) {
+        float drift = fmodf(app->menuTime * 5.0f + (float)i * 130.0f, 130.0f) - 130.0f;
+        float x = drift + (float)i * 150.0f;
+
+        gfx_fill_triangle(x, 0.0f, x + 84.0f, 0.0f, x - 60.0f, 240.0f,
+                          rgba(0.10f, 0.12f, 0.22f, 0.10f));
+        gfx_fill_triangle(x + 84.0f, 0.0f, x + 24.0f, 240.0f, x - 60.0f, 240.0f,
+                          rgba(0.10f, 0.12f, 0.22f, 0.10f));
+    }
+
+    gfx_outline_circle(200.0f, 108.0f, 98.0f, 14.0f,
+                       rgba(0.12f, 0.15f, 0.30f, 0.11f));
+    gfx_outline_circle(200.0f, 108.0f, 72.0f, 2.0f,
+                       rgba(0.25f, 0.30f, 0.50f, 0.11f));
+}
+
+/* Darkens the screen edges a little so the eye lands on the title. */
+static void draw_menu_vignette(void)
+{
+    int k;
+    float off = 0.0f;
+
+    for (k = 0; k < 3; k++) {
+        float w = 7.0f;
+        float a = 0.15f - 0.045f * (float)k;
+
+        gfx_fill_rect(off, 0.0f, w, (float)TOP_H, rgba(0.0f, 0.0f, 0.0f, a));
+        gfx_fill_rect((float)TOP_W - off - w, 0.0f, w, (float)TOP_H,
+                      rgba(0.0f, 0.0f, 0.0f, a));
+        gfx_fill_rect(0.0f, off, (float)TOP_W, w, rgba(0.0f, 0.0f, 0.0f, a));
+        gfx_fill_rect(0.0f, (float)TOP_H - off - w, (float)TOP_W, w,
+                      rgba(0.0f, 0.0f, 0.0f, a));
+        off += w;
+    }
+}
+
+/* Chunky BL2-style button: black body, gold trim, dark inner face and a
+ * yellow/black hazard-stripe block at each end.  The caller draws the label. */
+static void draw_comic_button(float x, float y, float w, float h,
+                              GfxColor glowColor, float pulse)
+{
+    art_glow(x + w * 0.5f, y + h * 0.5f, w * 0.62f, glowColor, 0.12f * pulse);
+    gfx_fill_rect(x + 4.0f, y + 4.0f, w, h, rgba(0.0f, 0.0f, 0.0f, 0.45f));
+    gfx_fill_rect(x, y, w, h, COL_MENU_INK);
+    gfx_outline_rect(x + 2.0f, y + 2.0f, w - 4.0f, h - 4.0f, 2.0f, COL_GOLD);
+    gfx_fill_rect(x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f,
+                  rgba(0.07f, 0.06f, 0.12f, 1.0f));
+    gfx_fill_rect(x + 5.0f, y + 5.0f, w - 10.0f, 2.0f,
+                  rgba(1.0f, 0.92f, 0.55f, 0.22f));
+    art_hazard_strip(x + 5.0f, y + 5.0f, 16.0f, h - 10.0f);
+    art_hazard_strip(x + w - 21.0f, y + 5.0f, 16.0f, h - 10.0f);
+}
+
+void render_menu_top(const App *app)
+{
+    static const int kEmblemOrder[5] = { DMG_FIRE, DMG_ELECTRIC, DMG_CORROSIVE,
+                                         DMG_SLAG, DMG_EXPLOSIVE };
+    static const char *const kEmblemNames[5] = { "FIRE", "SHOCK", "CORROSIVE",
+                                                 "SLAG", "EXPLOSIVE" };
+    float pulse;
+    int i;
+
+    draw_menu_background(app);
+
+    /* drifting embers in the damage-type colours */
     for (i = 0; i < MENU_PARTICLE_COUNT; i++) {
         const MenuParticle *p = &app->particles[i];
         float alpha = p->life / p->maxLife;
@@ -372,50 +624,49 @@ void render_menu_top(const App *app)
                       rgba(p->r, p->g, p->b, alpha));
     }
 
-    /* warm halo behind the title */
-    art_glow(200.0f, 50.0f, 120.0f, COL_GOLD, 0.10f);
+    /* warm halo behind the comic title */
+    art_glow(200.0f, 52.0f, 115.0f, COL_GOLD, 0.07f);
 
-    /* layered title, like the original's shadow + glow text */
-    text_centered(202.0f, 28.0f, 4.0f, kShadow, "ELEMENTAL");
-    text_centered(200.0f, 26.0f, 4.0f, COL_GOLD_SOFT, "ELEMENTAL");
+    /* chunky comic lettering: 8-direction black outline + drop shadow */
+    text_comic_centered(200.0f, 20.0f, 4.0f, COL_GOLD_SOFT, "ELEMENTAL");
+    text_comic_centered(200.0f, 58.0f, 3.0f, COL_WHITE, "DEFENSE");
 
-    text_centered(201.0f, 71.0f, 3.0f, kDefenseShadow, "DEFENSE");
-    text_centered(200.0f, 70.0f, 3.0f, COL_WHITE, "DEFENSE");
-
-    text_centered(200.0f, 103.0f, 1.0f, COL_MUTED, "TOWER DEFENSE");
-    gfx_fill_rect(120.0f, 116.0f, 160.0f, 1.0f, kDivider);
-
-    /* three representative tower types on the title screen */
+    /* small angled red banner tag tucked against the left edge of DEFENSE so
+     * it reads as a sticker rather than floating off on its own */
     {
-        static const int kMenuTypes[3] = { DMG_FIRE, DMG_ELECTRIC, DMG_SLAG };
+        float tx = 40.0f;
+        float ty = 62.0f;
+        GfxColor tag = { 0.85f, 0.14f, 0.14f, 1.0f };
 
-        for (i = 0; i < 3; i++) {
-            int type = kMenuTypes[i];
-            float cx = 140.0f + (float)i * 60.0f;
-            float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 2.0f;
-            float cy = 148.0f + bob;
-            GfxColor color = art_damage_color(type, 1.0f);
-            const TowerSpec *spec = game_tower_spec(type);
-
-            art_glow(cx, cy, 30.0f, color, 0.20f);
-            art_tower_icon(cx, cy, 14.0f, type);
-            text_centered(cx, 168.0f, 1.0f, art_damage_text_color(type),
-                          spec != NULL ? spec->name : "");
-        }
+        gfx_fill_triangle(tx, ty + 4.0f, tx + 74.0f, ty - 6.0f,
+                          tx + 80.0f, ty + 10.0f, tag);
+        gfx_fill_triangle(tx, ty + 4.0f, tx + 80.0f, ty + 10.0f,
+                          tx + 4.0f, ty + 20.0f, tag);
+        text_centered(tx + 40.0f, ty + 4.0f, 1.0f, COL_MENU_INK, "ATTEMPT 2");
     }
 
-    /* "press start" prompt */
-    pulse = 0.82f + 0.18f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
-    width = gfx_text_width("PRESS A OR TAP START", 1.0f) + 18.0f;
-    x = floorf((float)TOP_W * 0.5f - width * 0.5f);
-    gfx_fill_rect(x, 190.0f, width, 18.0f, rgba(0.04f, 0.04f, 0.10f, 0.85f));
-    gfx_outline_rect(x, 190.0f, width, 18.0f, 1.0f,
-                     rgba(0.40f, 0.35f, 0.15f, 0.45f));
-    text_centered(200.0f, 195.0f, 1.0f,
-                  rgba(1.0f, 1.0f, 1.0f, pulse), "PRESS A OR TAP START");
+    /* the five Borderlands emblems are the centrepiece */
+    for (i = 0; i < 5; i++) {
+        int type = kEmblemOrder[i];
+        float cx = 40.0f + (float)i * 80.0f;
+        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.3f) * 2.0f;
+        float cy = 122.0f + bob;
 
-    text_centered(200.0f, 222.0f, 1.0f, rgba(0.74f, 0.77f, 0.90f, 0.85f),
-                  "A NATIVE 3DS REMAKE");
+        art_glow(cx, cy, 19.0f, art_emblem_color(type, 1.0f), 0.16f);
+        art_weapon_emblem(cx, cy, 10.0f, type);
+        text_centered(cx, 142.0f, 1.0f, COL_DAMAGE_TEXT[type], kEmblemNames[i]);
+    }
+
+    /* chunky "press start" button */
+    pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
+    draw_comic_button(80.0f, 184.0f, 240.0f, 30.0f, COL_GOLD, pulse);
+    text_centered(200.0f, 196.0f, 1.0f, COL_GOLD_SOFT, "PRESS A OR TAP START");
+
+    /* small footer balances the band under the prompt */
+    text_centered(200.0f, 222.0f, 1.0f, rgba(0.80f, 0.83f, 0.94f, 0.90f),
+                  "A 3DS HOMEBREW REMAKE - v0.4");
+
+    draw_menu_vignette();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -705,19 +956,21 @@ static void draw_towers(const App *app)
 
         cx = cell_px_x((float)tower->col + 0.5f);
         cy = cell_px_y((float)tower->row + 0.5f);
-        /* icon radius by tier, matching the original 12.4..16 px at 28 px
-         * cells scaled to our 15 px cells (design.md 11.1) */
-        size = tower->level >= TOWER_MAX_LEVEL ? 9.0f
-                                               : (tower->level >= 5 ? 8.0f : 7.0f);
+        /* small emblem (simplified detail level) sized to the 15 px cell */
+        size = tower->level >= TOWER_MAX_LEVEL ? 7.0f
+                                               : (tower->level >= 5 ? 6.2f : 5.4f);
         pulse = 0.5f + 0.5f * sinf(app->time * 2.4f + tower->animPhase);
 
-        art_glow(cx, cy, size * 2.2f, glow, 0.09f + 0.05f * pulse);
+        art_glow(cx, cy, size * 1.9f, glow, 0.08f + 0.04f * pulse);
 
-        /* a little platform under the glyph */
-        gfx_fill_rect(cx - 5.5f, cy + size * 0.55f, 11.0f, 2.0f,
-                      rgba(0.0f, 0.0f, 0.0f, 0.35f));
+        /* Token backing disc so towers stay readable on the dark board at 1x:
+         * a dark base, a low-alpha tint of the damage-type colour and a thin
+         * coloured rim.  All cheap filled circles (1 quad each on the 3DS). */
+        gfx_fill_circle(cx, cy, 7.0f, rgba(0.0f, 0.0f, 0.0f, 0.35f));
+        gfx_fill_circle(cx, cy, 6.4f, rgba(color.r, color.g, color.b, 0.20f));
+        gfx_outline_circle(cx, cy, 7.0f, 1.0f, rgba(color.r, color.g, color.b, 0.70f));
 
-        art_tower_icon(cx, cy, size, tower->damageType);
+        art_weapon_emblem(cx, cy, size, tower->damageType);
 
         /* level bar: 1 px progress line pinned to the bottom of the cell, so it
          * never collides with the glyph or the neighbouring row */
@@ -735,7 +988,7 @@ static void draw_towers(const App *app)
 
         /* max level towers get a golden cap, like the original */
         if (tower->level >= TOWER_MAX_LEVEL) {
-            gfx_fill_rect(cx - 3.0f, cy - size - 4.0f, 6.0f, 2.0f,
+            gfx_fill_rect(cx - 3.0f, cy - size - 5.0f, 6.0f, 2.0f,
                           rgba(1.0f, 1.0f, 0.4f, 0.9f));
         }
     }

@@ -55,7 +55,7 @@ bool ui_rect_contains(UiRect r, float x, float y)
 
 UiRect ui_start_rect(void)
 {
-    UiRect r = { 50.0f, 124.0f, 220.0f, 64.0f };
+    UiRect r = { 48.0f, 112.0f, 224.0f, 64.0f };
     return r;
 }
 
@@ -242,61 +242,68 @@ static void draw_preview_row(float x, float y, int count, int layerType, bool el
 /* Menu screen                                                               */
 /* ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ */
+/* Menu screen (Borderlands-style: comic title, emblem row, chunky START)    */
+/* ------------------------------------------------------------------------ */
+
+/* Chunky BL2 START button: black body, gold trim, red face, hazard-stripe
+ * blocks at both ends (mirrors the top-screen prompt button). */
+static void draw_start_button(float pulse)
+{
+    UiRect start = ui_start_rect();
+    float cx = start.x + start.w * 0.5f;
+
+    art_glow(cx, start.y + start.h * 0.5f, 118.0f, COL_RED, 0.13f * pulse);
+    gfx_fill_rect(start.x + 4.0f, start.y + 4.0f, start.w, start.h,
+                  rgba(0.0f, 0.0f, 0.0f, 0.45f));
+    gfx_fill_rect(start.x, start.y, start.w, start.h, COL_MENU_INK);
+    gfx_outline_rect(start.x + 2.0f, start.y + 2.0f, start.w - 4.0f,
+                     start.h - 4.0f, 2.0f, COL_GOLD);
+    gfx_fill_rect(start.x + 5.0f, start.y + 5.0f, start.w - 10.0f,
+                  start.h - 10.0f, rgba(0.80f, 0.12f, 0.12f, 1.0f));
+    gfx_fill_rect(start.x + 5.0f, start.y + 5.0f, start.w - 10.0f, 3.0f,
+                  rgba(1.0f, 0.55f, 0.45f, 0.30f));
+    art_hazard_strip(start.x + 5.0f, start.y + 5.0f, 18.0f, start.h - 10.0f);
+    art_hazard_strip(start.x + start.w - 23.0f, start.y + 5.0f, 18.0f,
+                     start.h - 10.0f);
+
+    text_comic_centered(cx, start.y + 10.0f, 3.0f, COL_WHITE, "START");
+    text_centered(cx, start.y + 44.0f, 1.0f, COL_GOLD_SOFT, "TAP OR PRESS A");
+}
+
 static void draw_menu(const App *app)
 {
-    char buf[64];
+    static const int kEmblemTypes[3] = { DMG_FIRE, DMG_ELECTRIC, DMG_SLAG };
+    static const char *const kEmblemNames[3] = { "FIRE", "SHOCK", "SLAG" };
+    float pulse;
     int i;
 
-    /* layered title */
-    art_glow(160.0f, 40.0f, 130.0f, COL_GOLD, 0.10f);
-    text_centered(161.0f, 17.0f, 3.0f, rgba(0.25f, 0.15f, 0.03f, 0.9f), "ELEMENTAL");
-    text_centered(160.0f, 14.0f, 3.0f, COL_GOLD_SOFT, "ELEMENTAL");
-    text_centered(160.0f, 44.0f, 2.0f, COL_WHITE, "DEFENSE");
-    text_centered(160.0f, 66.0f, 1.0f, COL_MUTED, "TOWER DEFENSE");
+    /* comic title (same lettering treatment as the top screen).  Shifted down
+     * so the 8-direction outline keeps a margin from the screen edge; the old
+     * "TOWER DEFENSE" subtitle is dropped for a cleaner stack. */
+    art_glow(160.0f, 40.0f, 110.0f, COL_GOLD, 0.07f);
+    text_comic_centered(160.0f, 12.0f, 3.0f, COL_GOLD_SOFT, "ELEMENTAL");
+    text_comic_centered(160.0f, 42.0f, 2.0f, COL_WHITE, "DEFENSE");
 
-    /* three representative tower types (fire / shock / slag) */
-    {
-        static const int kMenuTypes[3] = { DMG_FIRE, DMG_ELECTRIC, DMG_SLAG };
+    /* three representative damage emblems */
+    for (i = 0; i < 3; i++) {
+        int type = kEmblemTypes[i];
+        float cx = 80.0f + (float)i * 80.0f;
+        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 1.5f;
+        float cy = 78.0f + bob;
 
-        for (i = 0; i < 3; i++) {
-            int type = kMenuTypes[i];
-            float cx = 80.0f + (float)i * 80.0f;
-            float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 1.5f;
-            float cy = 92.0f + bob;
-            GfxColor color = art_damage_color(type, 1.0f);
-            const TowerSpec *spec = game_tower_spec(type);
-
-            art_glow(cx, cy, 26.0f, color, 0.22f);
-            art_tower_icon(cx, cy, 12.0f, type);
-            text_centered(cx, 110.0f, 1.0f, art_damage_text_color(type),
-                          spec != NULL ? spec->name : "");
-        }
+        art_glow(cx, cy, 24.0f, art_emblem_color(type, 1.0f), 0.20f);
+        art_weapon_emblem(cx, cy, 9.0f, type);
+        text_centered(cx, 96.0f, 1.0f, COL_DAMAGE_TEXT[type], kEmblemNames[i]);
     }
 
-    /* START button */
-    {
-        UiRect start = ui_start_rect();
-        float cx = start.x + start.w * 0.5f;
+    pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
+    draw_start_button(pulse);
 
-        art_glow(cx, start.y + start.h * 0.5f, 110.0f, COL_RED, 0.14f);
-        gfx_fill_rect(start.x + 3.0f, start.y + 3.0f, start.w, start.h,
-                      rgba(0.0f, 0.0f, 0.0f, 0.30f));
-        gfx_fill_rect(start.x, start.y, start.w, start.h,
-                      rgba(0.85f, 0.15f, 0.15f, 1.0f));
-        gfx_fill_rect(start.x + 3.0f, start.y + 3.0f, start.w - 6.0f,
-                      start.h * 0.5f, rgba(1.0f, 0.30f, 0.30f, 0.30f));
-        gfx_outline_rect(start.x, start.y, start.w, start.h, 1.0f,
-                         rgba(1.0f, 0.45f, 0.45f, 0.55f));
-        text_centered(cx, start.y + 12.0f, 3.0f, COL_WHITE, "START");
-        text_centered(cx, start.y + 44.0f, 1.0f, rgba(1.0f, 0.85f, 0.85f, 0.85f),
-                      "TAP OR PRESS A");
-    }
-
-    snprintf(buf, sizeof(buf), "D-PAD TO BUILD - TOUCH FOR BUTTONS");
-    text_centered(160.0f, 198.0f, 1.0f, COL_DIM, buf);
-    text_centered(160.0f, 214.0f, 1.0f, COL_DIM, "SELECT SPEED - START PAUSE");
-    text_centered(160.0f, 228.0f, 1.0f, rgba(0.72f, 0.75f, 0.88f, 0.85f),
-                  "A NATIVE 3DS REMAKE");
+    text_centered(160.0f, 198.0f, 1.0f, COL_DIM,
+                  "ATTEMPT 2 - 3DS HOMEBREW - v0.4");
+    text_centered(160.0f, 216.0f, 1.0f, COL_DIM,
+                  "D-PAD TO BUILD - TOUCH FOR BUTTONS");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -397,10 +404,10 @@ static void draw_tower_palette(const App *app)
                                   : rgba(0.22f, 0.22f, 0.42f, 0.70f));
 
         /* narrow icon column so the full 9-character names fit */
-        art_glow(r.x + 12.0f, r.y + 13.0f, 11.0f, glow, selected ? 0.30f : 0.14f);
-        art_tower_icon(r.x + 12.0f, r.y + 13.0f, 7.0f, i);
+        art_glow(r.x + 12.0f, r.y + 13.0f, 9.0f, glow, selected ? 0.30f : 0.14f);
+        art_weapon_emblem(r.x + 12.0f, r.y + 13.0f, 4.5f, i);
 
-        gfx_text(r.x + 21.0f, r.y + 4.0f, 1.0f,
+        gfx_text(r.x + 18.0f, r.y + 4.0f, 1.0f,
                  selected ? COL_WHITE : COL_MUTED, kTowerNames[i]);
 
         art_coin(r.x + 26.0f, r.y + 19.0f, 2.5f);
@@ -494,7 +501,7 @@ static void draw_info_panel(const App *app)
         dps = fireRate > 0.0f ? damage / fireRate : 0.0f;
 
         art_glow(15.0f, 96.0f, 11.0f, color, 0.18f);
-        art_tower_icon(15.0f, 96.0f, 5.5f, tower->damageType);
+        art_weapon_emblem(15.0f, 96.0f, 6.0f, tower->damageType);
 
         snprintf(buf, sizeof(buf), "%s LV.%d",
                  tower_display_name(tower->damageType), (int)tower->level);

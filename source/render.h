@@ -91,6 +91,28 @@ static const GfxColor COL_PUDDLE_RIM  = { 0.78f, 1.00f, 0.40f, 1.00f };
 static const GfxColor COL_BURN_MOTE   = { 1.00f, 0.58f, 0.12f, 1.00f };
 static const GfxColor COL_STUN_SPARK  = { 0.92f, 0.97f, 1.00f, 1.00f };
 
+/* ---- Borderlands-style weapon emblems ----------------------------------
+ * Reference shapes only (drawn from scratch, no image files): incendiary
+ * flame, three-bolt shock fan, corrosive trefoil-over-ring, slag wave, gold
+ * explosive starburst.  Colours follow the BL2 emblems. */
+static const GfxColor COL_EMBLEM[TOWER_TYPE_COUNT] = {
+    { 0.80f, 0.80f, 0.84f, 1.00f },   /* GUN       grey          */
+    { 1.00f, 0.40f, 0.00f, 1.00f },   /* FIRE      #FF6600       */
+    { 0.00f, 0.39f, 0.88f, 1.00f },   /* SHOCK     #0064E0       */
+    { 0.00f, 0.83f, 0.00f, 1.00f },   /* CORROSIVE #00D400       */
+    { 0.71f, 0.24f, 1.00f, 1.00f },   /* SLAG      #B43CFF       */
+    { 1.00f, 0.82f, 0.00f, 1.00f }    /* EXPLOSIVE #FFD200       */
+};
+static const GfxColor COL_EMBLEM_DARK[TOWER_TYPE_COUNT] = {
+    { 0.38f, 0.38f, 0.44f, 1.00f },   /* gun body / driving band */
+    { 0.78f, 0.22f, 0.00f, 1.00f },   /* flame inner shadow      */
+    { 0.45f, 0.75f, 1.00f, 1.00f },   /* bolt highlight          */
+    { 0.09f, 0.47f, 0.15f, 1.00f },   /* corrosive ring          */
+    { 0.90f, 0.55f, 1.00f, 1.00f },   /* slag highlight          */
+    { 1.00f, 0.40f, 0.00f, 1.00f }    /* explosive shadow        */
+};
+static const GfxColor COL_MENU_INK   = { 0.02f, 0.02f, 0.05f, 1.00f };
+
 /* ------------------------------------------------------------------------ */
 /* Screens                                                                   */
 /* ------------------------------------------------------------------------ */
@@ -123,10 +145,13 @@ float board_cell_top(int row);
  * a fraction of a cell is handled by the caller). */
 bool board_hit_cell(float px, float py, int *col, int *row);
 
-/* Pixel-art tower glyphs, one per DamageType (0..5): gun, flame, lightning
- * bolt, dripping acid, crystal, bomb.  `cx/cy` is the centre, `size` roughly
- * half the height in pixels.  Colour comes from COL_DAMAGE_TYPE. */
-void art_tower_icon(float cx, float cy, float size, int damageType);
+/* Borderlands-style weapon emblem, one per DamageType (0..5): bullet, flame,
+ * three-bolt fan, biohazard trefoil, slag wave, explosive starburst.
+ * `cx/cy` is the centre, `size` is roughly half the height in pixels.  Two
+ * detail levels are picked automatically: size >= 12 draws the detailed version
+ * (menus), smaller sizes draw a simplified glyph (palette, board towers).
+ * Colours come from COL_EMBLEM/COL_EMBLEM_DARK. */
+void art_weapon_emblem(float cx, float cy, float size, int damageType);
 
 /* Generic art bits still used by menus / previews. */
 void art_star(float cx, float cy, float size, GfxColor color);
@@ -135,11 +160,22 @@ void art_coin(float cx, float cy, float radius);
 void art_heart(float cx, float cy, float size, GfxColor color);
 void art_glow(float cx, float cy, float radius, GfxColor color, float alpha);
 
+/* Chunky comic-style button dressing shared by both menu screens:
+ * - text_comic_centered: 8-direction near-black outline + drop shadow + fill
+ *   (the BL2 title look).  Costs ~10 text passes: fine for the light menu
+ *   frame, never used on the battlefield.
+ * - art_hazard_strip: black block with yellow/black diagonal hazard stripes,
+ *   used at the ends of menu buttons. */
+void text_comic_centered(float cx, float y, float scale, GfxColor fill,
+                         const char *text);
+void art_hazard_strip(float x, float y, float w, float h);
+
 /* Colour tables, clamped to range; alpha is applied to the result. */
 GfxColor art_damage_color(int damageType, float alpha);
 GfxColor art_damage_text_color(int damageType);
 GfxColor art_layer_color(int layerType, float alpha);
 GfxColor art_layer_text_color(int layerType);
+GfxColor art_emblem_color(int damageType, float alpha);
 
 /* Health bar centred on cx; y is the top edge.  frac in 0..1, green -> red. */
 void art_health_bar(float cx, float y, float width, float height, float frac);
