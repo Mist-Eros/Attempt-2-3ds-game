@@ -119,7 +119,8 @@ typedef struct {
     int towerCount;
     int8_t occupancy[GRID_ROWS][GRID_COLS];  /* 0 = empty, else tower index + 1 */
     Path path;
-    bool pathBlocked;       /* set if a placement would make the goal unreachable */
+    bool pathBlocked;       /* defensive only: live board has no route; placement
+                             * rejections are pre-checked in game_can_place_at() */
 
     /* dynamic entities */
     Enemy enemies[MAX_ENEMIES];

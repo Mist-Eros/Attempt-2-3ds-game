@@ -80,7 +80,7 @@ happened — real-hardware input and GPU output are the next thing I'll verify o
 What's still missing:
 
 - [ ] sound effects and music (the audio layer is stubbed, the original `.wav`s are still around)
-- [ ] real-hardware playtest tuning — balance is currently the old LÖVE numbers on a hand-built road
+- [ ] real-hardware playtest tuning — balance is still the old LÖVE numbers on top of the new maze mechanic
 - [ ] general polish: another pass on the menus, and the bottom panel starts to feel cramped at 320px
 
 ## Building it
