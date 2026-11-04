@@ -62,6 +62,12 @@ void audio_play_event(uint32_t game_events)
     s_calls++;
 }
 
+/* Music streaming is a 3DS-only concern; the host build has no hardware to
+ * keep fed, so the per-frame hook is intentionally a no-op. */
+void audio_update(void)
+{
+}
+
 void audio_set_music(AudioMusic track)
 {
     if (!s_initialized)

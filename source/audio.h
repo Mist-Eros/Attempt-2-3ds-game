@@ -32,6 +32,11 @@ void audio_exit(void);
  * layer calls this once per frame and then clears Game.events. */
 void audio_play_event(uint32_t game_events);
 
+/* Called once per frame from the platform main loop.  On the 3DS this keeps
+ * the streamed music ring buffers topped up; the portable fallback does
+ * nothing. */
+void audio_update(void);
+
 /* Idempotent: switching to the track that is already playing is a no-op.
  * AUDIO_MUSIC_NONE stops whatever is playing. */
 void audio_set_music(AudioMusic track);

@@ -1,24 +1,32 @@
 /*
- * Elemental Defense - Nintendo 3DS audio backend (libctru ndsp)
+ * Elemental Defense - Nintendo 3DS audio backend (libctru ndsp + Tremor)
  *
- * Implements the portable audio.h contract with the DSP mixer:
- *   - channels 0/1 are reserved for the looping music tracks
- *   - channels 2..15 are a small SFX voice pool (mono PCM16, 22050 Hz)
- *   - the raw PCM data comes from data/ *.bin, linked in by the Makefile's
- *     bin2o rule; the generated build/ *_bin.h headers declare
- *     the arrays and size constants for each file (see tools/make_audio.py)
+ * Implements the portable audio.h contract:
+ *   - music: the two full original Ogg Vorbis tracks are streamed from the
+ *     .3dsx romfs with integer Tremor decoding (3ds-libvorbisidec).  Decoded
+ *     48 kHz stereo is downsampled to 32 kHz mono and fed through a ring of
+ *     four ndsp wave buffers (0.25 s each, music channel 0).  audio_update()
+ *     refills finished buffers from the main loop, so the whole ~2 min track
+ *     loops instead of a short segment.  The compressed OGGs are linked into
+ *     the binary (data/music_*_ogg.bin) and decoded from memory, so no SD
+ *     card files or romfs are involved.  The short embedded PCM loops stay
+ *     as a fallback when Tremor/decoding is unavailable.
+ *   - SFX: the embedded mono PCM16 clips in data/ (channels 2..15).
  *
- * All sample data is copied once into linearAlloc'd memory during
- * audio_init() because the DSP reads wave buffers from linear memory (this is
- * what the devkitPro ndsp examples do).  There is no dynamic allocation after
- * init; every clip is static, and if ndspInit() fails (e.g. missing DSP
- * firmware) the whole module silently disables itself so the game still runs.
+ * The DSP reads wave buffers from linear memory, so every buffer used here is
+ * linearAlloc'd once in audio_init(); there is no dynamic allocation after
+ * init.  If ndspInit() fails (missing DSP firmware) the module silently
+ * disables itself and the game runs normally.  If the embedded OGGs cannot be
+ * decoded we keep the embedded PCM loops, so music never regresses to silence.
  */
 #include <3ds.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+
+#include <tremor/ivorbisfile.h>
 
 #include "audio.h"
 #include "game.h"   /* GAME_EVT_* bits dispatched by the core */
@@ -40,6 +48,8 @@
 #include "sfx_victory_bin.h"
 #include "music_menu_bin.h"
 #include "music_game_bin.h"
+#include "music_menu_ogg_bin.h"
+#include "music_game_ogg_bin.h"
 
 #define MUSIC_CHANNEL        0
 #define MUSIC_CHANNEL_SPARE  1
@@ -47,13 +57,21 @@
 #define SFX_CHANNEL_COUNT    14
 #define SFX_CHANNEL_LAST     (SFX_CHANNEL_FIRST + SFX_CHANNEL_COUNT - 1)
 
-#define MUSIC_RATE           16000u
+#define MUSIC_RATE           16000u   /* embedded PCM fallback loops        */
 #define SFX_RATE             22050u
 
 #define LINEAR_ALIGN         64u
 #define LASER_MIN_INTERVAL_MS 60u
 /* SYSCLOCK_ARM11 / 1000 == 268111.856 ticks per ms -> round up. */
 #define TICKS_PER_MS         268112ULL
+
+/* --- Ogg Vorbis streaming ------------------------------------------------ */
+#define STREAM_RATE            32000u  /* output rate (mono)               */
+#define STREAM_BUFFER_SAMPLES  8000u   /* 0.25 s per wave buffer           */
+#define STREAM_BUFFERS         4u      /* 1.0 s of queued audio            */
+#define STREAM_DECODE_SAMPLES  4096    /* mono samples per ov_read() burst */
+#define STREAM_GAIN            0.72f   /* headroom for the SFX mix         */
+#define STREAM_MAX_REFILL      2       /* buffers decoded per audio_update */
 
 enum {
     SFX_BUILD = 0,
@@ -86,21 +104,52 @@ typedef struct {
     u32            nsamples;
 } AudioClip;
 
+typedef struct {
+    const uint8_t  *data;   /* linked OGG bytes                    */
+    size_t          size;
+    size_t          pos;
+    OggVorbis_File  vf;
+    bool            opened;
+    int             channels;
+    long            rate;
+} StreamTrack;
+
 static AudioClip s_sfx[SFX_CLIP_COUNT];
 static AudioClip s_music[MUSIC_CLIP_COUNT];
 static ndspWaveBuf s_voice_buf[SFX_CHANNEL_COUNT];
 static ndspWaveBuf s_music_buf[MUSIC_CLIP_COUNT];
+
+static StreamTrack s_tracks[MUSIC_CLIP_COUNT];
+static ndspWaveBuf s_stream_buf[STREAM_BUFFERS];
+static s16   *s_stream_ram = NULL;
+static bool   s_stream_ready = false;   /* both tracks opened + ring RAM   */
+static bool   s_stream_active = false;  /* ring primed and playing         */
+static int    s_stream_index = -1;      /* which track is streamed         */
+static u32    s_stream_rate_long = 0;   /* source rate, for the resampler  */
+
+/* decoder staging (mono) + raw interleaved output of ov_read() */
+static s16    s_decode_raw[STREAM_DECODE_SAMPLES * 2];
+static s16    s_decode_mono[STREAM_DECODE_SAMPLES];
+static int    s_decode_count = 0;
+static int    s_decode_pos = 0;
+
+/* linear resampler state (persists across buffers and the loop seam) */
+static int16_t s_resample_prev = 0;
+static double  s_resample_pos = 0.0;
+static bool    s_resample_have_prev = false;
 
 static bool   s_enabled = false;
 static bool   s_muted = false;
 static AudioMusic s_current = AUDIO_MUSIC_NONE;
 static AudioMusic s_requested = AUDIO_MUSIC_NONE;
 static s16   *s_linear = NULL;
-static u32    s_linear_bytes = 0;
 static u32    s_voice_next = 0;
 static u32    s_rng = 0x2545F491u;
 static u64    s_last_laser_tick = 0;
 static bool   s_laser_played = false;
+static u32    s_stream_underruns = 0;
+static bool   s_logged_stream = false;
+static bool   s_logged_fallback = false;
 
 /* ------------------------------------------------------------------------ */
 /* small helpers                                                             */
@@ -113,68 +162,35 @@ static u32 align_up(u32 value, u32 alignment)
 
 static u32 next_random(void)
 {
-    /* xorshift32: deterministic, never zero for this seed */
     s_rng ^= s_rng << 13;
     s_rng ^= s_rng >> 17;
     s_rng ^= s_rng << 5;
     return s_rng;
 }
 
-static void clip_set(AudioClip *clip, const uint8_t *rom, size_t bytes, bool need_ram)
+static void audio_log(const char *msg)
+{
+    /* Shows up in Azahar/Citra logs as an svcOutputDebugString line. */
+    svcOutputDebugString(msg, (int)strlen(msg));
+}
+
+static void clip_set(AudioClip *clip, const uint8_t *rom, size_t bytes)
 {
     clip->rom = rom;
     clip->bytes = bytes;
     clip->ram = NULL;
     clip->nsamples = 0;
-    if (need_ram && bytes >= 2u && (bytes & 1u) == 0u)
+    if (bytes >= 2u && (bytes & 1u) == 0u)
         clip->nsamples = (u32)(bytes / 2u);
 }
 
-static void music_configure_channel(int id)
+static void channel_setup(int id, u32 rate, ndspInterpType interp)
 {
     ndspChnReset(id);
     ndspChnSetFormat(id, NDSP_FORMAT_MONO_PCM16);
-    ndspChnSetInterp(id, NDSP_INTERP_LINEAR);
-    ndspChnSetRate(id, (float)MUSIC_RATE);
+    ndspChnSetInterp(id, interp);
+    ndspChnSetRate(id, (float)rate);
     ndspChnSetPaused(id, false);
-}
-
-static void sfx_configure_channel(int id)
-{
-    ndspChnReset(id);
-    ndspChnSetFormat(id, NDSP_FORMAT_MONO_PCM16);
-    ndspChnSetInterp(id, NDSP_INTERP_NONE);
-    ndspChnSetRate(id, (float)SFX_RATE);
-    ndspChnSetPaused(id, false);
-}
-
-static void music_play(AudioMusic track)
-{
-    AudioClip *clip;
-    ndspWaveBuf *buf;
-
-    if (track == AUDIO_MUSIC_MENU)
-        clip = &s_music[MUSIC_CLIP_MENU];
-    else if (track == AUDIO_MUSIC_GAME)
-        clip = &s_music[MUSIC_CLIP_GAME];
-    else
-        return;
-
-    if (clip->ram == NULL || clip->nsamples == 0u)
-        return;
-
-    buf = &s_music_buf[track == AUDIO_MUSIC_MENU ? MUSIC_CLIP_MENU : MUSIC_CLIP_GAME];
-    ndspChnWaveBufClear(MUSIC_CHANNEL);
-    memset(buf, 0, sizeof(*buf));
-    buf->data_pcm16 = clip->ram;
-    buf->nsamples = clip->nsamples;
-    buf->looping = true;
-    buf->status = NDSP_WBUF_FREE;
-    ndspChnSetPaused(MUSIC_CHANNEL, false);
-    ndspChnWaveBufAdd(MUSIC_CHANNEL, buf);
-
-    if (s_muted)
-        ndspChnSetPaused(MUSIC_CHANNEL, true);
 }
 
 static void sfx_stop_all(void)
@@ -211,9 +227,8 @@ static void play_clip(int clip_index)
             break;
         }
     }
-    if (channel < 0) {
+    if (channel < 0)
         channel = (int)(s_voice_next % (u32)SFX_CHANNEL_COUNT);
-    }
     s_voice_next = ((u32)channel + 1u) % (u32)SFX_CHANNEL_COUNT;
 
     buf = &s_voice_buf[channel];
@@ -240,6 +255,354 @@ static void play_laser_rate_limited(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* embedded PCM music fallback (short loops in data/)                       */
+/* ------------------------------------------------------------------------ */
+
+static void music_play_embedded(AudioMusic track)
+{
+    AudioClip *clip;
+    ndspWaveBuf *buf;
+    int index;
+
+    if (track == AUDIO_MUSIC_MENU)
+        index = MUSIC_CLIP_MENU;
+    else if (track == AUDIO_MUSIC_GAME)
+        index = MUSIC_CLIP_GAME;
+    else
+        return;
+
+    clip = &s_music[index];
+    if (clip->ram == NULL || clip->nsamples == 0u)
+        return;
+
+    buf = &s_music_buf[index];
+    ndspChnWaveBufClear(MUSIC_CHANNEL);
+    ndspChnSetFormat(MUSIC_CHANNEL, NDSP_FORMAT_MONO_PCM16);
+    ndspChnSetInterp(MUSIC_CHANNEL, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(MUSIC_CHANNEL, (float)MUSIC_RATE);
+    memset(buf, 0, sizeof(*buf));
+    buf->data_pcm16 = clip->ram;
+    buf->nsamples = clip->nsamples;
+    buf->looping = true;
+    buf->status = NDSP_WBUF_FREE;
+    ndspChnSetPaused(MUSIC_CHANNEL, false);
+    ndspChnWaveBufAdd(MUSIC_CHANNEL, buf);
+    if (s_muted)
+        ndspChnSetPaused(MUSIC_CHANNEL, true);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Ogg Vorbis streaming                                                     */
+/* ------------------------------------------------------------------------ */
+
+static bool stream_decode_chunk(void)
+{
+    StreamTrack *t;
+
+    if (s_stream_index < 0 || s_stream_index >= MUSIC_CLIP_COUNT)
+        return false;
+    t = &s_tracks[s_stream_index];
+    if (!t->opened)
+        return false;
+
+    for (;;) {
+        int bitstream = 0;
+        long got = ov_read(&t->vf, (char *)s_decode_raw,
+                           (int)sizeof(s_decode_raw), &bitstream);
+        if (got > 0) {
+            long frames = got / (long)(2 * t->channels);
+            long i;
+
+            if (frames <= 0)
+                continue;
+            if (frames > STREAM_DECODE_SAMPLES)
+                frames = STREAM_DECODE_SAMPLES;
+            for (i = 0; i < frames; i++) {
+                int v;
+                if (t->channels >= 2)
+                    v = ((int)s_decode_raw[i * 2] + (int)s_decode_raw[i * 2 + 1]) / 2;
+                else
+                    v = s_decode_raw[i];
+                s_decode_mono[i] = (s16)v;
+            }
+            s_decode_count = (int)frames;
+            s_decode_pos = 0;
+            return true;
+        }
+        if (got == 0) {
+            /* EOF: restart the whole track -- that is the music loop.  The
+             * resampler state is deliberately kept so the seam cannot click. */
+            if (ov_pcm_seek(&t->vf, 0) != 0)
+                return false;
+            continue;
+        }
+        return false; /* read error */
+    }
+}
+
+static s16 clamp_s16(float v)
+{
+    if (v > 32767.0f)
+        v = 32767.0f;
+    else if (v < -32768.0f)
+        v = -32768.0f;
+    return (s16)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+}
+
+/* Downsample (48 kHz stereo -> 32 kHz mono already mono here) with linear
+ * interpolation.  The source rate is always higher than STREAM_RATE for our
+ * assets (48 kHz), so at most one output sample is produced per input sample;
+ * that keeps the per-sample state (prev/pos) exact across buffer boundaries. */
+static bool stream_fill_buffer(s16 *out, u32 samples)
+{
+    u32 written = 0;
+    double step;
+
+    if (s_stream_index < 0 || s_stream_index >= MUSIC_CLIP_COUNT)
+        return false;
+    step = (double)s_stream_rate_long / (double)STREAM_RATE;
+    if (step < 1.0)
+        step = 1.0; /* defensive: never upsample inside this simple resampler */
+
+    while (written < samples) {
+        if (s_decode_pos >= s_decode_count) {
+            if (!stream_decode_chunk())
+                return false;
+        }
+        while (s_decode_pos < s_decode_count && written < samples) {
+            int cur = (int)s_decode_mono[s_decode_pos++];
+
+            if (!s_resample_have_prev) {
+                s_resample_have_prev = true;
+                s_resample_prev = (int16_t)cur;
+                s_resample_pos = 0.0;
+                out[written++] = clamp_s16((float)cur * STREAM_GAIN);
+                s_resample_pos += step;
+                continue;
+            }
+            while (s_resample_pos < 1.0 && written < samples) {
+                double v = (double)s_resample_prev
+                         + ((double)cur - (double)s_resample_prev) * s_resample_pos;
+                out[written++] = clamp_s16((float)v * STREAM_GAIN);
+                s_resample_pos += step;
+            }
+            s_resample_pos -= 1.0;
+            s_resample_prev = (int16_t)cur;
+        }
+    }
+    return true;
+}
+
+static void stream_stop(void)
+{
+    ndspChnWaveBufClear(MUSIC_CHANNEL);
+    memset(s_stream_buf, 0, sizeof(s_stream_buf));
+    s_stream_active = false;
+    s_stream_index = -1;
+}
+
+static bool stream_prime(void)
+{
+    u32 i;
+
+    ndspChnWaveBufClear(MUSIC_CHANNEL);
+    memset(s_stream_buf, 0, sizeof(s_stream_buf));
+    for (i = 0; i < STREAM_BUFFERS; i++) {
+        u8 *base = (u8 *)s_stream_ram + (u32)i * STREAM_BUFFER_SAMPLES * 2u;
+        ndspWaveBuf *b = &s_stream_buf[i];
+
+        b->data_pcm16 = (s16 *)base;
+        b->nsamples = STREAM_BUFFER_SAMPLES;
+        b->looping = false;
+        b->status = NDSP_WBUF_FREE;
+        if (!stream_fill_buffer((s16 *)base, STREAM_BUFFER_SAMPLES))
+            return false;
+        ndspChnWaveBufAdd(MUSIC_CHANNEL, b);
+    }
+    return true;
+}
+
+static bool stream_begin(int index)
+{
+    StreamTrack *t;
+
+    if (!s_stream_ready || index < 0 || index >= MUSIC_CLIP_COUNT)
+        return false;
+    t = &s_tracks[index];
+    if (!t->opened)
+        return false;
+
+    stream_stop();
+    if (ov_pcm_seek(&t->vf, 0) != 0)
+        return false;
+    s_decode_count = 0;
+    s_decode_pos = 0;
+    s_resample_have_prev = false;
+    s_resample_pos = 0.0;
+    s_stream_index = index;
+    s_stream_rate_long = (u32)(t->rate > 0 ? t->rate : 48000);
+
+    ndspChnSetFormat(MUSIC_CHANNEL, NDSP_FORMAT_MONO_PCM16);
+    ndspChnSetInterp(MUSIC_CHANNEL, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(MUSIC_CHANNEL, (float)STREAM_RATE);
+    ndspChnSetPaused(MUSIC_CHANNEL, false);
+
+    if (!stream_prime()) {
+        stream_stop();
+        return false;
+    }
+    s_stream_active = true;
+    if (s_muted)
+        ndspChnSetPaused(MUSIC_CHANNEL, true);
+    return true;
+}
+
+/* Called from audio_update() when decoding fails mid-track. */
+static void stream_fail_to_embedded(void)
+{
+    AudioMusic track = s_current;
+
+    s_stream_underruns++;
+    stream_stop();
+    if (track == AUDIO_MUSIC_NONE)
+        return;
+    if (!s_logged_fallback) {
+        s_logged_fallback = true;
+        audio_log("ED audio: stream failure, embedded PCM fallback\n");
+    }
+    music_play_embedded(track);
+}
+
+/* The OGGs are linked into the binary, so the Tremor callbacks read straight
+ * out of that memory.  ov_callbacks wants a datasource pointer; we hand it the
+ * StreamTrack itself because its first fields are the buffer cursor. */
+static size_t mem_read(void *ptr, size_t size, size_t nmemb, void *datasource)
+{
+    StreamTrack *t = (StreamTrack *)datasource;
+    size_t want = size * nmemb;
+    size_t left;
+
+    if (size == 0u || nmemb == 0u)
+        return 0;
+    left = t->size - t->pos;
+    if (want > left)
+        want = left;
+    memcpy(ptr, t->data + t->pos, want);
+    t->pos += want;
+    return want / size;
+}
+
+static int mem_seek(void *datasource, ogg_int64_t offset, int whence)
+{
+    StreamTrack *t = (StreamTrack *)datasource;
+    ogg_int64_t target;
+
+    if (whence == SEEK_SET)
+        target = offset;
+    else if (whence == SEEK_CUR)
+        target = (ogg_int64_t)t->pos + offset;
+    else if (whence == SEEK_END)
+        target = (ogg_int64_t)t->size + offset;
+    else
+        return -1;
+    if (target < 0 || target > (ogg_int64_t)t->size)
+        return -1;
+    t->pos = (size_t)target;
+    return 0;
+}
+
+static int mem_close(void *datasource)
+{
+    (void)datasource;
+    return 0;
+}
+
+static long mem_tell(void *datasource)
+{
+    return (long)((StreamTrack *)datasource)->pos;
+}
+
+static const ov_callbacks k_mem_callbacks = {
+    mem_read, mem_seek, mem_close, mem_tell
+};
+
+static bool stream_open_mem(StreamTrack *t, const uint8_t *data, size_t size)
+{
+    vorbis_info *info;
+
+    if (data == NULL || size < 4u)
+        return false;
+    t->data = data;
+    t->size = size;
+    t->pos = 0;
+    memset(&t->vf, 0, sizeof(t->vf));
+    if (ov_open_callbacks(t, &t->vf, NULL, 0, k_mem_callbacks) != 0)
+        return false;
+    if (ov_seekable(&t->vf) != 1) {
+        ov_clear(&t->vf);
+        return false;
+    }
+    info = ov_info(&t->vf, 0);
+    if (info == NULL) {
+        ov_clear(&t->vf);
+        return false;
+    }
+    t->channels = info->channels > 0 ? info->channels : 2;
+    t->rate = info->rate > 0 ? info->rate : 48000;
+    t->opened = true;
+    return true;
+}
+
+static void stream_close_all(void)
+{
+    int i;
+
+    for (i = 0; i < MUSIC_CLIP_COUNT; i++) {
+        if (s_tracks[i].opened) {
+            ov_clear(&s_tracks[i].vf);
+            s_tracks[i].opened = false;
+        }
+    }
+}
+
+static void stream_init(void)
+{
+    int i;
+
+    for (i = 0; i < MUSIC_CLIP_COUNT; i++) {
+        const uint8_t *data = (i == MUSIC_CLIP_MENU)
+                            ? music_menu_ogg_bin : music_game_ogg_bin;
+        size_t size = (i == MUSIC_CLIP_MENU)
+                    ? music_menu_ogg_bin_size : music_game_ogg_bin_size;
+
+        s_tracks[i].opened = false;
+        if (!stream_open_mem(&s_tracks[i], data, size)) {
+            stream_close_all();
+            return;
+        }
+    }
+
+    s_stream_ram = (s16 *)linearAlloc(STREAM_BUFFERS * STREAM_BUFFER_SAMPLES * 2u);
+    if (s_stream_ram == NULL) {
+        stream_close_all();
+        return;
+    }
+    memset(s_stream_ram, 0, STREAM_BUFFERS * STREAM_BUFFER_SAMPLES * 2u);
+    s_stream_ready = true;
+}
+
+static void stream_shutdown(void)
+{
+    stream_stop();
+    stream_close_all();
+    if (s_stream_ram != NULL) {
+        linearFree(s_stream_ram);
+        s_stream_ram = NULL;
+    }
+    s_stream_ready = false;
+}
+
+/* ------------------------------------------------------------------------ */
 /* public API                                                                */
 /* ------------------------------------------------------------------------ */
 
@@ -258,24 +621,30 @@ void audio_init(void)
     s_rng = 0x2545F491u;
     s_laser_played = false;
     s_last_laser_tick = 0;
+    s_stream_ready = false;
+    s_stream_active = false;
+    s_stream_index = -1;
+    s_logged_stream = false;
+    s_logged_fallback = false;
+    s_stream_underruns = 0;
 
     /* describe every clip first so one linear block can hold the lot */
-    clip_set(&s_sfx[SFX_BUILD],       sfx_build_bin,       sfx_build_bin_size,       true);
-    clip_set(&s_sfx[SFX_SELL],        sfx_sell_bin,        sfx_sell_bin_size,        true);
-    clip_set(&s_sfx[SFX_LASER],       sfx_laser_bin,       sfx_laser_bin_size,       true);
-    clip_set(&s_sfx[SFX_ENEMY_DIE],   sfx_enemy_die_bin,   sfx_enemy_die_bin_size,   true);
-    clip_set(&s_sfx[SFX_WAVE_START],  sfx_wave_start_bin,  sfx_wave_start_bin_size,  true);
-    clip_set(&s_sfx[SFX_GAMEOVER],    sfx_gameover_bin,    sfx_gameover_bin_size,    true);
-    clip_set(&s_sfx[SFX_UPGRADE_1],   sfx_upgrade_1_bin,   sfx_upgrade_1_bin_size,   true);
-    clip_set(&s_sfx[SFX_UPGRADE_2],   sfx_upgrade_2_bin,   sfx_upgrade_2_bin_size,   true);
-    clip_set(&s_sfx[SFX_UPGRADE_3],   sfx_upgrade_3_bin,   sfx_upgrade_3_bin_size,   true);
-    clip_set(&s_sfx[SFX_UPGRADE_4],   sfx_upgrade_4_bin,   sfx_upgrade_4_bin_size,   true);
-    clip_set(&s_sfx[SFX_UPGRADE_5],   sfx_upgrade_5_bin,   sfx_upgrade_5_bin_size,   true);
-    clip_set(&s_sfx[SFX_UPGRADE_6],   sfx_upgrade_6_bin,   sfx_upgrade_6_bin_size,   true);
-    clip_set(&s_sfx[SFX_LEAK],        sfx_leak_bin,        sfx_leak_bin_size,        true);
-    clip_set(&s_sfx[SFX_VICTORY],     sfx_victory_bin,     sfx_victory_bin_size,     true);
-    clip_set(&s_music[MUSIC_CLIP_MENU], music_menu_bin, music_menu_bin_size, true);
-    clip_set(&s_music[MUSIC_CLIP_GAME], music_game_bin, music_game_bin_size, true);
+    clip_set(&s_sfx[SFX_BUILD],       sfx_build_bin,       sfx_build_bin_size);
+    clip_set(&s_sfx[SFX_SELL],        sfx_sell_bin,        sfx_sell_bin_size);
+    clip_set(&s_sfx[SFX_LASER],       sfx_laser_bin,       sfx_laser_bin_size);
+    clip_set(&s_sfx[SFX_ENEMY_DIE],   sfx_enemy_die_bin,   sfx_enemy_die_bin_size);
+    clip_set(&s_sfx[SFX_WAVE_START],  sfx_wave_start_bin,  sfx_wave_start_bin_size);
+    clip_set(&s_sfx[SFX_GAMEOVER],    sfx_gameover_bin,    sfx_gameover_bin_size);
+    clip_set(&s_sfx[SFX_UPGRADE_1],   sfx_upgrade_1_bin,   sfx_upgrade_1_bin_size);
+    clip_set(&s_sfx[SFX_UPGRADE_2],   sfx_upgrade_2_bin,   sfx_upgrade_2_bin_size);
+    clip_set(&s_sfx[SFX_UPGRADE_3],   sfx_upgrade_3_bin,   sfx_upgrade_3_bin_size);
+    clip_set(&s_sfx[SFX_UPGRADE_4],   sfx_upgrade_4_bin,   sfx_upgrade_4_bin_size);
+    clip_set(&s_sfx[SFX_UPGRADE_5],   sfx_upgrade_5_bin,   sfx_upgrade_5_bin_size);
+    clip_set(&s_sfx[SFX_UPGRADE_6],   sfx_upgrade_6_bin,   sfx_upgrade_6_bin_size);
+    clip_set(&s_sfx[SFX_LEAK],        sfx_leak_bin,        sfx_leak_bin_size);
+    clip_set(&s_sfx[SFX_VICTORY],     sfx_victory_bin,     sfx_victory_bin_size);
+    clip_set(&s_music[MUSIC_CLIP_MENU], music_menu_bin, music_menu_bin_size);
+    clip_set(&s_music[MUSIC_CLIP_GAME], music_game_bin, music_game_bin_size);
 
     if (ndspInit() != 0) {
         /* No DSP firmware / no service: run without audio. */
@@ -303,32 +672,33 @@ void audio_init(void)
         ndspExit();
         return;
     }
-    s_linear_bytes = total;
 
     for (i = 0; i < SFX_CLIP_COUNT; i++) {
-        if (s_sfx[i].bytes >= 2u && (s_sfx[i].bytes & 1u) == 0u) {
-            memcpy((u8 *)s_linear + offset, s_sfx[i].rom, s_sfx[i].bytes);
-            s_sfx[i].ram = (s16 *)((u8 *)s_linear + offset);
-        }
+        memcpy((u8 *)s_linear + offset, s_sfx[i].rom, s_sfx[i].bytes);
+        s_sfx[i].ram = (s16 *)((u8 *)s_linear + offset);
         offset += sizes[i];
     }
     for (i = 0; i < MUSIC_CLIP_COUNT; i++) {
-        if (s_music[i].bytes >= 2u && (s_music[i].bytes & 1u) == 0u) {
-            memcpy((u8 *)s_linear + offset, s_music[i].rom, s_music[i].bytes);
-            s_music[i].ram = (s16 *)((u8 *)s_linear + offset);
-        }
+        memcpy((u8 *)s_linear + offset, s_music[i].rom, s_music[i].bytes);
+        s_music[i].ram = (s16 *)((u8 *)s_linear + offset);
         offset += sizes[SFX_CLIP_COUNT + i];
     }
 
-    for (i = 0; i < MUSIC_CLIP_COUNT; i++)
-        memset(&s_music_buf[i], 0, sizeof(s_music_buf[i]));
-    for (i = 0; i < SFX_CHANNEL_COUNT; i++)
-        memset(&s_voice_buf[i], 0, sizeof(s_voice_buf[i]));
+    memset(s_music_buf, 0, sizeof(s_music_buf));
+    memset(s_voice_buf, 0, sizeof(s_voice_buf));
 
-    music_configure_channel(MUSIC_CHANNEL);
-    music_configure_channel(MUSIC_CHANNEL_SPARE);
+    channel_setup(MUSIC_CHANNEL, MUSIC_RATE, NDSP_INTERP_LINEAR);
+    channel_setup(MUSIC_CHANNEL_SPARE, MUSIC_RATE, NDSP_INTERP_LINEAR);
     for (i = 0; i < SFX_CHANNEL_COUNT; i++)
-        sfx_configure_channel(SFX_CHANNEL_FIRST + i);
+        channel_setup(SFX_CHANNEL_FIRST + i, SFX_RATE, NDSP_INTERP_NONE);
+
+    /* Full-track OGG streaming from the linked data is preferred; if anything
+     * about it fails the embedded PCM loops above remain the music source. */
+    stream_init();
+    if (s_stream_ready)
+        audio_log("ED audio: streaming OGG from embedded data\n");
+    else
+        audio_log("ED audio: embedded PCM fallback (Tremor unavailable)\n");
 
     s_enabled = true;
 
@@ -346,6 +716,7 @@ void audio_exit(void)
             ndspChnSetPaused(i, true);
         }
         sfx_stop_all();
+        stream_shutdown();
         ndspExit();
         s_enabled = false;
     }
@@ -353,7 +724,6 @@ void audio_exit(void)
         linearFree(s_linear);
         s_linear = NULL;
     }
-    s_linear_bytes = 0;
     s_current = AUDIO_MUSIC_NONE;
     s_requested = AUDIO_MUSIC_NONE;
 }
@@ -383,6 +753,29 @@ void audio_play_event(uint32_t game_events)
         play_clip(SFX_LEAK);
 }
 
+void audio_update(void)
+{
+    int i;
+    int refilled = 0;
+
+    if (!s_enabled || !s_stream_active || s_muted)
+        return;
+
+    for (i = 0; i < (int)STREAM_BUFFERS && refilled < STREAM_MAX_REFILL; i++) {
+        ndspWaveBuf *b = &s_stream_buf[i];
+
+        if (b->status != NDSP_WBUF_DONE && b->status != NDSP_WBUF_FREE)
+            continue;
+        if (!stream_fill_buffer(b->data_pcm16, STREAM_BUFFER_SAMPLES)) {
+            stream_fail_to_embedded();
+            return;
+        }
+        ndspChnWaveBufAdd(MUSIC_CHANNEL, b);
+        refilled++;
+    }
+
+}
+
 void audio_set_music(AudioMusic track)
 {
     if (track != AUDIO_MUSIC_MENU && track != AUDIO_MUSIC_GAME)
@@ -397,10 +790,26 @@ void audio_set_music(AudioMusic track)
     s_current = track;
     ndspChnWaveBufClear(MUSIC_CHANNEL);
     if (track == AUDIO_MUSIC_NONE) {
+        stream_stop();
         ndspChnSetPaused(MUSIC_CHANNEL, true);
         return;
     }
-    music_play(track);
+
+    if (s_stream_ready) {
+        int index = (track == AUDIO_MUSIC_MENU) ? MUSIC_CLIP_MENU : MUSIC_CLIP_GAME;
+        if (stream_begin(index)) {
+            if (!s_logged_stream) {
+                s_logged_stream = true;
+                audio_log("ED audio: streaming full OGG track\n");
+            }
+            return;
+        }
+        if (!s_logged_fallback) {
+            s_logged_fallback = true;
+            audio_log("ED audio: stream start failed, embedded PCM fallback\n");
+        }
+    }
+    music_play_embedded(track);
 }
 
 AudioMusic audio_current_music(void)

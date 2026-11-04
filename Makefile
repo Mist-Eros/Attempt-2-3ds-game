@@ -35,8 +35,8 @@ CFLAGS  := -g -Wall -Wextra -O2 -mword-relocations -ffunction-sections $(ARCH)
 CFLAGS  += $(INCLUDE) -D__3DS__
 LDFLAGS := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    := -lcitro2d -lcitro3d -lctru -lm
-LIBDIRS := $(CTRULIB)
+LIBS    := -lcitro2d -lcitro3d -lvorbisidec -logg -lctru -lm
+LIBDIRS := $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
@@ -89,6 +89,7 @@ endif
 ifeq ($(strip $(NO_SMDH)),)
     export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
 endif
+
 
 .PHONY: all clean
 

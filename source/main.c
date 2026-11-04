@@ -116,6 +116,7 @@ int main(void)
 
         app_tick(&s_app, &input, dt);
         app_draw(&s_app);
+        audio_update();
     }
 
     audio_exit();
