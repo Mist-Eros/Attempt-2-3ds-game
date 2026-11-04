@@ -1,7 +1,8 @@
 # Attempt 2: Elemental Defense for the 3DS
 
 A tower defense game I originally wrote in LÖVE2D, rebuilt from scratch in C so it actually runs
-properly on a Nintendo 3DS — now with a Borderlands-style layered damage model.
+properly on a Nintendo 3DS — with a Borderlands-style layered damage model and a BL2-inspired
+title screen full of element emblems.
 
 The first attempt ran the LÖVE version through LovePotion. It booted! And then crawled at a few
 frames per second with half the playfield off-screen and touch controls fighting LÖVE's mouse
@@ -49,14 +50,15 @@ you can build as long as you like before calling the next one in.
 
 ## Screenshots
 
-Straight out of Azahar, top screen above and touchscreen below:
+Rendered by the game's own frame code (top screen above, touchscreen below) — the PC preview
+harness runs the same `game.h`/`gfx.h` rendering the 3DS backend uses, so this is exactly what the
+console draws:
 
-| Menu | Build phase: all six damage types | Wave: layered creeps |
+| Menu: five element emblems | Build phase: six damage types | Wave: layered creeps |
 |---|---|---|
 | ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![combat](docs/screenshots/wave.png) |
 
-Close-ups of the damage model, rendered by the game's own frame code in the PC preview harness
-(the menu/build/wave shots above are real Azahar captures):
+Close-ups of the damage model (layered rings, burn stacks, acid puddle, explosive blast):
 
 ![effects](docs/screenshots/effects.png)
 
@@ -88,7 +90,8 @@ Playing under an emulator (I use Azahar)? I map **WASD** to the d-pad, **U/H/J/K
 ## Status
 
 Playable end to end: maze building on the road, 25 waves, six damage types against layered enemies,
-status effects, upgrades, lives, game over, victory. It boots at a stable 60 fps in the Azahar
+status effects, upgrades, lives, game over, victory. The v0.4 pass redesigned the title screen and
+gave the palette/board Borderlands-style element emblems drawn as original pixel art. It boots at a stable 60 fps in the Azahar
 emulator, which is where all my testing so far happened — real-hardware input and GPU output are the
 next thing I'll verify on the actual console. What's still missing:
 
