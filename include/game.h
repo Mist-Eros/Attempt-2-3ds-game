@@ -141,6 +141,15 @@ typedef struct {
     uint32_t events;
 
     uint32_t rng;           /* deterministic xorshift state */
+
+    /*
+     * --- appended by the core (never reorder existing fields!) ---
+     * Leftover real time that game_update() has not turned into fixed steps
+     * yet. Kept in the struct (instead of a static) so two Game instances in
+     * the same process never share simulation state - the host tests rely on
+     * that to compare two runs side by side.
+     */
+    float stepAccumulator;
 } Game;
 
 /* ---- content tables (implemented in the core) ---- */
@@ -207,6 +216,16 @@ bool game_can_place_at(const Game *g, int col, int row, int type);
 
 /* what the upcoming wave will throw at you (for the bottom-screen preview) */
 void game_wave_preview(const Game *g, int *fire, int *water, int *forest, int *elite);
+
+/* ---- appended content queries (append-only additions, see core/NOTES.md) ---- */
+
+/*
+ * Damage multiplier of a tower type against an enemy element.
+ * The matrix is not symmetric: fire melts forest but is weak to water.
+ * type/element values outside 0..2 are clamped to 0.
+ * Result is 2.0, 1.0 or 0.5.
+ */
+float game_damage_multiplier(int towerType, int enemyElement);
 
 float game_path_length(const Game *g);      /* in cells */
 Vec2 game_cell_center(int col, int row);    /* cell-space center */
