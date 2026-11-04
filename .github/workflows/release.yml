@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: devkitpro/devkitarm:latest
+      options: --user root
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: build
+        run: make
+
+      - name: package
+        run: zip -j ElementalDefense.3dsx.zip ElementalDefense.3dsx
+
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Elemental Defense ${{ github.ref_name }}
+          body: |
+            Elemental Defense for the Nintendo 3DS.
+
+            Download `ElementalDefense.3dsx` (or the zip), copy it to the `/3ds/` folder on your
+            SD card, then launch it from the Homebrew Launcher.
+          files: |
+            ElementalDefense.3dsx
+            ElementalDefense.3dsx.zip
