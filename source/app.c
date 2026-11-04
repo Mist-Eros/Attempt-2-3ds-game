@@ -399,6 +399,7 @@ void app_init(App *app)
      * screenshots run to run; main.c overwrites this with real entropy. */
     app->seed = 0x5EED1234u;
     app->particleRng = 0x1BADB002u;
+    app->lastMusicPhase = -1;
 
     for (i = 0; i < MENU_PARTICLE_COUNT; i++)
         particle_spawn(app, &app->particles[i], true);
@@ -460,6 +461,17 @@ void app_tick(App *app, const Input *input, float dt)
         int remaining = g->enemiesAlive + g->enemiesToSpawn;
         if (remaining > app->waveEnemyTotal)
             app->waveEnemyTotal = remaining;
+    }
+
+    /* Music track follows the phase.  Only call audio_set_music() when the
+     * phase actually changes: the 3DS backend is idempotent, but this keeps
+     * the portable fallback's recorded track deterministic for the preview
+     * harness/tests.  Results keep the game track (stings arrive as events). */
+    if ((int)g->phase != app->lastMusicPhase) {
+        AudioMusic track = (g->phase == PHASE_MENU) ? AUDIO_MUSIC_MENU
+                                                    : AUDIO_MUSIC_GAME;
+        audio_set_music(track);
+        app->lastMusicPhase = (int)g->phase;
     }
 
     /* Never leave feedback bits sitting in the state: the platform audio

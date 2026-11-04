@@ -103,6 +103,10 @@ typedef struct {
      * the denominator.  Reset whenever Game.wave changes. */
     int waveTrackedWave;    /* wave number waveEnemyTotal belongs to */
     int waveEnemyTotal;     /* peak alive+queued enemies for that wave  */
+
+    /* Last Game.phase the music track was set for (-1 = not set yet), so
+     * app_tick only calls audio_set_music() on actual transitions. */
+    int lastMusicPhase;
 } App;
 
 /* ------------------------------------------------------------------------ */

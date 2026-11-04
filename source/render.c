@@ -584,21 +584,94 @@ static void draw_menu_vignette(void)
     }
 }
 
-/* Chunky BL2-style button: black body, gold trim, dark inner face and a
- * yellow/black hazard-stripe block at each end.  The caller draws the label. */
-static void draw_comic_button(float x, float y, float w, float h,
-                              GfxColor glowColor, float pulse)
+/* ------------------------------------------------------------------------ */
+/* BL2 in-game UI dressing (shared with ui.c)                                */
+/* ------------------------------------------------------------------------ */
+
+void art_panel(float x, float y, float w, float h, float cut, GfxColor trim,
+               bool shadow)
 {
-    art_glow(x + w * 0.5f, y + h * 0.5f, w * 0.62f, glowColor, 0.12f * pulse);
+    static const GfxColor kBody = { 0.045f, 0.045f, 0.085f, 0.97f };
+    static const GfxColor kInner = { 0.13f, 0.12f, 0.20f, 0.90f };
+    float x2 = x + w;
+    float y2 = y + h;
+
+    if (cut < 2.0f)
+        cut = 2.0f;
+    if (cut * 2.0f > w - 4.0f)
+        cut = (w - 4.0f) * 0.5f;
+    if (cut * 2.0f > h - 4.0f)
+        cut = (h - 4.0f) * 0.5f;
+
+    if (shadow) {
+        gfx_fill_rect(x + cut + 3.0f, y + 3.0f, w - 2.0f * cut, h,
+                      rgba(0.0f, 0.0f, 0.0f, 0.35f));
+        gfx_fill_rect(x + 3.0f, y + cut + 3.0f, w, h - 2.0f * cut,
+                      rgba(0.0f, 0.0f, 0.0f, 0.35f));
+    }
+
+    /* body = horizontal + vertical rects; the four corner squares stay empty,
+     * which produces the 45-degree chamfer */
+    gfx_fill_rect(x + cut, y, w - 2.0f * cut, h, kBody);
+    gfx_fill_rect(x, y + cut, w, h - 2.0f * cut, kBody);
+
+    /* trim: four straight edges + four chamfer diagonals */
+    gfx_line(x + cut, y, x2 - cut, y, 2.0f, trim);
+    gfx_line(x + cut, y2 - 1.0f, x2 - cut, y2 - 1.0f, 2.0f, trim);
+    gfx_line(x, y + cut, x, y2 - cut, 2.0f, trim);
+    gfx_line(x2 - 1.0f, y + cut, x2 - 1.0f, y2 - cut, 2.0f, trim);
+    gfx_line(x + cut, y + 1.0f, x + 1.0f, y + cut, 2.0f, trim);
+    gfx_line(x2 - cut, y + 1.0f, x2 - 1.0f, y + cut, 2.0f, trim);
+    gfx_line(x + 1.0f, y2 - cut, x + cut, y2 - 1.0f, 2.0f, trim);
+    gfx_line(x2 - 1.0f, y2 - cut, x2 - cut, y2 - 1.0f, 2.0f, trim);
+
+    /* thin dark inner keyline on the four straight sides */
+    gfx_line(x + cut, y + 3.0f, x2 - cut, y + 3.0f, 1.0f, kInner);
+    gfx_line(x + cut, y2 - 4.0f, x2 - cut, y2 - 4.0f, 1.0f, kInner);
+    gfx_line(x + 3.0f, y + cut, x + 3.0f, y2 - cut, 1.0f, kInner);
+    gfx_line(x2 - 4.0f, y + cut, x2 - 4.0f, y2 - cut, 1.0f, kInner);
+}
+
+void art_comic_button(float x, float y, float w, float h, GfxColor fill,
+                      GfxColor glow, float pulse)
+{
+    art_glow(x + w * 0.5f, y + h * 0.5f, w * 0.62f, glow, 0.13f * pulse);
     gfx_fill_rect(x + 4.0f, y + 4.0f, w, h, rgba(0.0f, 0.0f, 0.0f, 0.45f));
     gfx_fill_rect(x, y, w, h, COL_MENU_INK);
     gfx_outline_rect(x + 2.0f, y + 2.0f, w - 4.0f, h - 4.0f, 2.0f, COL_GOLD);
-    gfx_fill_rect(x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f,
-                  rgba(0.07f, 0.06f, 0.12f, 1.0f));
+    gfx_fill_rect(x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f, fill);
     gfx_fill_rect(x + 5.0f, y + 5.0f, w - 10.0f, 2.0f,
-                  rgba(1.0f, 0.92f, 0.55f, 0.22f));
+                  rgba(1.0f, 1.0f, 1.0f, 0.18f));
     art_hazard_strip(x + 5.0f, y + 5.0f, 16.0f, h - 10.0f);
     art_hazard_strip(x + w - 21.0f, y + 5.0f, 16.0f, h - 10.0f);
+}
+
+void art_hazard_fill(float x, float y, float w, float h, GfxColor base,
+                     GfxColor stripe)
+{
+    int row;
+    int span = (int)(w + h) / 10 + 2;
+
+    if (w <= 0.0f || h <= 0.0f)
+        return;
+
+    gfx_fill_rect(x, y, w, h, base);
+    for (row = 0; row < (int)h; row += 2) {
+        int k;
+
+        for (k = -1; k <= span; k++) {
+            float sx = x + (float)k * 10.0f + (float)row;
+            float x0 = sx;
+            float x1 = sx + 5.0f;
+
+            if (x0 < x)
+                x0 = x;
+            if (x1 > x + w)
+                x1 = x + w;
+            if (x1 > x0)
+                gfx_fill_rect(floorf(x0), y + (float)row, x1 - x0, 2.0f, stripe);
+        }
+    }
 }
 
 void render_menu_top(const App *app)
@@ -659,7 +732,8 @@ void render_menu_top(const App *app)
 
     /* chunky "press start" button */
     pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
-    draw_comic_button(80.0f, 184.0f, 240.0f, 30.0f, COL_GOLD, pulse);
+    art_comic_button(80.0f, 184.0f, 240.0f, 30.0f, rgba(0.07f, 0.06f, 0.12f, 1.0f),
+                     COL_GOLD, pulse);
     text_centered(200.0f, 196.0f, 1.0f, COL_GOLD_SOFT, "PRESS A OR TAP START");
 
     /* small footer balances the band under the prompt */
@@ -700,9 +774,12 @@ static void draw_hud(const App *app)
     GfxColor phaseColor;
     int shownWave = g->wave > g->totalWaves ? g->totalWaves : g->wave;
 
-    gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, HUD_H, rgba(0.035f, 0.035f, 0.09f, 1.0f));
-    gfx_fill_rect(0.0f, HUD_H - 1.0f, (float)TOP_W, 1.0f,
-                  rgba(0.20f, 0.20f, 0.38f, 0.45f));
+    /* BL2-style HUD band: near-black body, gold trim along the bottom edge and
+     * small hazard ticks in the gaps between the stat groups. */
+    gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, HUD_H, rgba(0.04f, 0.04f, 0.075f, 1.0f));
+    art_hazard_strip(92.0f, 10.0f, 6.0f, 11.0f);
+    art_hazard_strip(148.0f, 10.0f, 6.0f, 11.0f);
+    art_hazard_strip(306.0f, 10.0f, 6.0f, 11.0f);
 
     /* gold */
     art_coin(14.0f, 19.0f, 6.0f);
@@ -752,6 +829,15 @@ static void draw_hud(const App *app)
     snprintf(buf, sizeof(buf), "%.0fX", (double)g->speedMultiplier);
     gfx_text(330.0f, 17.0f, 2.0f, g->speedMultiplier > 1.0f ? COL_YELLOW : COL_WHITE,
              buf);
+}
+
+/* Gold trim between the HUD strip and the board.  Drawn after the board so the
+ * board backing lip cannot cover it. */
+static void draw_hud_trim(void)
+{
+    gfx_fill_rect(0.0f, HUD_H - 4.0f, (float)TOP_W, 1.0f,
+                  rgba(0.12f, 0.10f, 0.06f, 0.95f));
+    gfx_fill_rect(0.0f, HUD_H - 2.0f, (float)TOP_W, 2.0f, COL_GOLD);
 }
 
 static void draw_board(const App *app, const int16_t pathMap[GRID_ROWS][GRID_COLS])
@@ -1263,6 +1349,7 @@ void render_game_top(const App *app)
 
     draw_hud(app);
     draw_board(app, pathMap);
+    draw_hud_trim();
     draw_puddles(app);          /* ground decals: under towers and enemies */
     draw_portal_markers(g);
     draw_range_previews(app);
@@ -1280,8 +1367,9 @@ void render_pause_overlay_top(void)
 {
     gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, (float)TOP_H,
                   rgba(0.0f, 0.0f, 0.0f, 0.62f));
-    gfx_fill_rect(96.0f, 72.0f, 208.0f, 92.0f, COL_PANEL);
-    gfx_outline_rect(96.0f, 72.0f, 208.0f, 92.0f, 1.0f, COL_BORDER_HI);
+    art_panel(96.0f, 72.0f, 208.0f, 92.0f, 8.0f, COL_GOLD, true);
+    art_hazard_strip(106.0f, 79.0f, 12.0f, 5.0f);
+    art_hazard_strip(282.0f, 79.0f, 12.0f, 5.0f);
 
     text_centered(200.0f, 86.0f, 3.0f, COL_WHITE, "PAUSED");
     text_centered(200.0f, 120.0f, 1.0f, COL_MUTED, "START TO RESUME");
@@ -1292,16 +1380,16 @@ void render_result_overlay_top(const App *app)
 {
     const Game *g = &app->game;
     bool victory = g->phase == PHASE_VICTORY;
+    GfxColor trim = victory ? COL_GOLD : rgba(1.0f, 0.35f, 0.30f, 1.0f);
     char buf[40];
     int seconds;
     int shownWave = g->wave > g->totalWaves ? g->totalWaves : g->wave;
 
     gfx_fill_rect(0.0f, 0.0f, (float)TOP_W, (float)TOP_H,
                   rgba(0.0f, 0.0f, 0.0f, 0.78f));
-    gfx_fill_rect(60.0f, 56.0f, 280.0f, 136.0f, COL_PANEL);
-    gfx_outline_rect(60.0f, 56.0f, 280.0f, 136.0f, 1.0f,
-                     victory ? rgba(1.0f, 0.8f, 0.2f, 0.6f)
-                             : rgba(1.0f, 0.2f, 0.2f, 0.6f));
+    art_panel(60.0f, 56.0f, 280.0f, 136.0f, 9.0f, trim, true);
+    art_hazard_strip(72.0f, 62.0f, 14.0f, 4.0f);
+    art_hazard_strip(314.0f, 62.0f, 14.0f, 4.0f);
 
     text_centered(200.0f, 68.0f, 3.0f,
                   victory ? COL_GOLD_SOFT : COL_RED,
@@ -1320,7 +1408,7 @@ void render_result_overlay_top(const App *app)
              g->gold);
     text_centered(200.0f, 136.0f, 1.0f, COL_MUTED, buf);
 
-    text_centered(200.0f, 164.0f, 1.0f, rgba(0.85f, 0.85f, 0.95f, 0.85f),
+    text_centered(200.0f, 164.0f, 1.0f, rgba(0.85f, 0.85f, 0.95f, 0.90f),
                   "A: PLAY AGAIN    B: MENU");
 }
 

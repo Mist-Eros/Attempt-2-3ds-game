@@ -170,6 +170,23 @@ void text_comic_centered(float cx, float y, float scale, GfxColor fill,
                          const char *text);
 void art_hazard_strip(float x, float y, float w, float h);
 
+/* ---- BL2 in-game UI dressing (shared by render.c and ui.c) ---------------
+ * art_panel: chamfered (45-degree cut) near-black panel with a 2 px trim line
+ * (gold by default, any colour accepted for the selected-tower header / toast)
+ * plus a thin dark inner line and an optional drop shadow.  Content is drawn
+ * on top by the caller; it never moves the layout.
+ * art_comic_button: chunky black-outline button with trim, coloured face and
+ * yellow/black hazard-stripe caps at both ends (menu prompt, START, NEXT WAVE,
+ * RESUME/PLAY AGAIN).
+ * art_hazard_fill: solid base with diagonal stripes, used for the wave
+ * progress bar so the fill reads as a hazard meter. */
+void art_panel(float x, float y, float w, float h, float cut, GfxColor trim,
+               bool shadow);
+void art_comic_button(float x, float y, float w, float h, GfxColor fill,
+                      GfxColor glow, float pulse);
+void art_hazard_fill(float x, float y, float w, float h, GfxColor base,
+                     GfxColor stripe);
+
 /* Colour tables, clamped to range; alpha is applied to the result. */
 GfxColor art_damage_color(int damageType, float alpha);
 GfxColor art_damage_text_color(int damageType);

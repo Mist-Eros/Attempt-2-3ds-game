@@ -157,8 +157,9 @@ static GfxColor rgba(float r, float g, float b, float a)
 
 static void fill_panel(UiRect r)
 {
-    gfx_fill_rect(r.x, r.y, r.w, r.h, COL_PANEL);
-    gfx_outline_rect(r.x, r.y, r.w, r.h, 1.0f, COL_BORDER);
+    /* BL2 chamfered panel: near-black body, gold trim, dark keyline, shadow.
+     * The rect is exactly the old panel rect, so no hitbox ever moves. */
+    art_panel(r.x, r.y, r.w, r.h, 6.0f, COL_GOLD, true);
 }
 
 static void panel_with_title(UiRect r, const char *title)
@@ -178,11 +179,11 @@ static void draw_button_frame(UiRect r, GfxColor fill, GfxColor border, bool ena
         edge.a *= 0.58f;
     }
 
-    gfx_fill_rect(r.x + 2.0f, r.y + 2.0f, r.w, r.h, rgba(0.0f, 0.0f, 0.0f, 0.35f));
-    gfx_fill_rect(r.x, r.y, r.w, r.h, body);
-    gfx_fill_rect(r.x + 2.0f, r.y + 2.0f, r.w - 4.0f, r.h * 0.42f,
-                  rgba(1.0f, 1.0f, 1.0f, enabled ? 0.10f : 0.05f));
-    gfx_outline_rect(r.x, r.y, r.w, r.h, 1.0f, edge);
+    /* chamfered BL2 action button: trim follows the cut corners */
+    art_panel(r.x, r.y, r.w, r.h, 4.0f, edge, true);
+    gfx_fill_rect(r.x + 4.0f, r.y + 3.0f, r.w - 8.0f, r.h - 6.0f, body);
+    gfx_fill_rect(r.x + 6.0f, r.y + 4.0f, r.w - 12.0f, 2.0f,
+                  rgba(1.0f, 1.0f, 1.0f, enabled ? 0.14f : 0.06f));
 }
 
 /* The tower index shown in the info panel: the explicitly selected tower wins,
@@ -231,6 +232,8 @@ static void draw_preview_row(float x, float y, int count, int layerType, bool el
         color = art_layer_text_color(layerType);
         gfx_fill_circle(x + 8.0f, y + 4.0f, 3.0f,
                         art_layer_color(layerType, 0.95f));
+        gfx_outline_circle(x + 8.0f, y + 4.0f, 3.6f, 1.0f,
+                           rgba(0.0f, 0.0f, 0.0f, 0.75f));
     }
 
     snprintf(buf, sizeof(buf), "%s x%d", elite ? "ELITE" : LAYER_NAMES[layerType],
@@ -246,26 +249,15 @@ static void draw_preview_row(float x, float y, int count, int layerType, bool el
 /* Menu screen (Borderlands-style: comic title, emblem row, chunky START)    */
 /* ------------------------------------------------------------------------ */
 
-/* Chunky BL2 START button: black body, gold trim, red face, hazard-stripe
- * blocks at both ends (mirrors the top-screen prompt button). */
+/* Chunky BL2 START button: shared comic-button helper with a red face and the
+ * usual black outline + gold trim + hazard-stripe caps. */
 static void draw_start_button(float pulse)
 {
     UiRect start = ui_start_rect();
     float cx = start.x + start.w * 0.5f;
 
-    art_glow(cx, start.y + start.h * 0.5f, 118.0f, COL_RED, 0.13f * pulse);
-    gfx_fill_rect(start.x + 4.0f, start.y + 4.0f, start.w, start.h,
-                  rgba(0.0f, 0.0f, 0.0f, 0.45f));
-    gfx_fill_rect(start.x, start.y, start.w, start.h, COL_MENU_INK);
-    gfx_outline_rect(start.x + 2.0f, start.y + 2.0f, start.w - 4.0f,
-                     start.h - 4.0f, 2.0f, COL_GOLD);
-    gfx_fill_rect(start.x + 5.0f, start.y + 5.0f, start.w - 10.0f,
-                  start.h - 10.0f, rgba(0.80f, 0.12f, 0.12f, 1.0f));
-    gfx_fill_rect(start.x + 5.0f, start.y + 5.0f, start.w - 10.0f, 3.0f,
-                  rgba(1.0f, 0.55f, 0.45f, 0.30f));
-    art_hazard_strip(start.x + 5.0f, start.y + 5.0f, 18.0f, start.h - 10.0f);
-    art_hazard_strip(start.x + start.w - 23.0f, start.y + 5.0f, 18.0f,
-                     start.h - 10.0f);
+    art_comic_button(start.x, start.y, start.w, start.h,
+                     rgba(0.80f, 0.12f, 0.12f, 1.0f), COL_RED, pulse);
 
     text_comic_centered(cx, start.y + 10.0f, 3.0f, COL_WHITE, "START");
     text_centered(cx, start.y + 44.0f, 1.0f, COL_GOLD_SOFT, "TAP OR PRESS A");
@@ -317,11 +309,17 @@ static void draw_header(const App *app)
     UiRect speed = ui_speed_rect();
     UiRect pause = ui_pause_rect();
     float speedCx = speed.x + speed.w * 0.5f;
+    GfxColor badgeTrim = rgba(0.62f, 0.50f, 0.16f, 0.95f);
 
+    /* BL2 header band: near-black body, gold trim along the bottom edge and
+     * hazard ticks between the stat groups. */
     gfx_fill_rect(0.0f, 0.0f, (float)BOT_W, HEADER_H,
-                  rgba(0.035f, 0.035f, 0.09f, 1.0f));
-    gfx_fill_rect(0.0f, HEADER_H - 1.0f, (float)BOT_W, 1.0f,
-                  rgba(0.20f, 0.20f, 0.38f, 0.45f));
+                  rgba(0.04f, 0.04f, 0.075f, 1.0f));
+    art_hazard_strip(90.0f, 10.0f, 4.0f, 11.0f);
+    art_hazard_strip(148.0f, 10.0f, 4.0f, 11.0f);
+    gfx_fill_rect(0.0f, HEADER_H - 4.0f, (float)BOT_W, 1.0f,
+                  rgba(0.12f, 0.10f, 0.06f, 0.95f));
+    gfx_fill_rect(0.0f, HEADER_H - 2.0f, (float)BOT_W, 2.0f, COL_GOLD);
 
     /* gold */
     art_coin(14.0f, 16.0f, 6.0f);
@@ -339,21 +337,13 @@ static void draw_header(const App *app)
     gfx_text(200.0f, 12.0f, 1.0f, COL_WHITE, buf);
 
     /* speed badge: the one and only touch control for game speed */
-    gfx_fill_rect(speed.x, speed.y, speed.w, speed.h, rgba(0.08f, 0.08f, 0.16f, 1.0f));
-    gfx_fill_rect(speed.x + 2.0f, speed.y + 2.0f, speed.w - 4.0f, speed.h * 0.40f,
-                  rgba(1.0f, 1.0f, 1.0f, 0.08f));
-    gfx_outline_rect(speed.x, speed.y, speed.w, speed.h, 1.0f,
-                     rgba(0.30f, 0.30f, 0.60f, 0.80f));
+    art_panel(speed.x, speed.y, speed.w, speed.h, 3.0f, badgeTrim, true);
     speed_text(g->speedMultiplier, buf, sizeof(buf));
     text_centered(speedCx, speed.y + 7.0f, 2.0f,
                   g->speedMultiplier > 1.0f ? COL_YELLOW : COL_WHITE, buf);
 
     /* pause badge */
-    gfx_fill_rect(pause.x, pause.y, pause.w, pause.h, rgba(0.08f, 0.08f, 0.16f, 1.0f));
-    gfx_fill_rect(pause.x + 2.0f, pause.y + 2.0f, pause.w - 4.0f, pause.h * 0.40f,
-                  rgba(1.0f, 1.0f, 1.0f, 0.08f));
-    gfx_outline_rect(pause.x, pause.y, pause.w, pause.h, 1.0f,
-                     rgba(0.30f, 0.30f, 0.60f, 0.80f));
+    art_panel(pause.x, pause.y, pause.w, pause.h, 3.0f, badgeTrim, true);
     gfx_fill_rect(pause.x + 10.0f, pause.y + 8.0f, 5.0f, 12.0f, COL_WHITE);
     gfx_fill_rect(pause.x + 19.0f, pause.y + 8.0f, 5.0f, 12.0f, COL_WHITE);
 }
@@ -394,14 +384,21 @@ static void draw_tower_palette(const App *app)
         bool selected = g->selectedType == i;
 
         if (selected)
-            art_glow(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 48.0f, glow, 0.12f);
+            art_glow(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 50.0f, glow, 0.14f);
 
-        gfx_fill_rect(r.x, r.y, r.w, r.h,
-                      selected ? rgba(color.r, color.g, color.b, 0.18f)
-                               : rgba(0.07f, 0.07f, 0.13f, 1.0f));
-        gfx_outline_rect(r.x, r.y, r.w, r.h, selected ? 2.0f : 1.0f,
-                         selected ? rgba(color.r, color.g, color.b, 0.90f)
-                                  : rgba(0.22f, 0.22f, 0.42f, 0.70f));
+        /* chamfered BL2 cell: selected = gold trim, unselected = dark trim plus
+         * a damage-type colour tab on the left edge */
+        art_panel(r.x, r.y, r.w, r.h, 5.0f,
+                  selected ? COL_GOLD : rgba(0.20f, 0.19f, 0.32f, 0.90f), true);
+        if (selected) {
+            gfx_fill_rect(r.x + 3.0f, r.y + 4.0f, r.w - 6.0f, r.h - 8.0f,
+                          rgba(color.r, color.g, color.b, 0.16f));
+            gfx_fill_rect(r.x + 6.0f, r.y + r.h - 4.0f, r.w - 12.0f, 2.0f,
+                          rgba(color.r, color.g, color.b, 0.95f));
+        } else {
+            gfx_fill_rect(r.x + 3.0f, r.y + 4.0f, 3.0f, r.h - 8.0f,
+                          rgba(color.r, color.g, color.b, 0.80f));
+        }
 
         /* narrow icon column so the full 9-character names fit */
         art_glow(r.x + 12.0f, r.y + 13.0f, 9.0f, glow, selected ? 0.30f : 0.14f);
@@ -500,6 +497,9 @@ static void draw_info_panel(const App *app)
                          &range);
         dps = fireRate > 0.0f ? damage / fireRate : 0.0f;
 
+        /* damage-type coloured header bar replaces the top gold trim segment */
+        gfx_fill_rect(panel.x + 7.0f, panel.y, panel.w - 14.0f, 2.0f, color);
+
         art_glow(15.0f, 96.0f, 11.0f, color, 0.18f);
         art_weapon_emblem(15.0f, 96.0f, 6.0f, tower->damageType);
 
@@ -580,11 +580,10 @@ static void draw_message(const App *app)
         width = 302.0f;
     x = floorf(((float)BOT_W - width) * 0.5f);
 
-    gfx_fill_rect(x, 35.0f, width, 18.0f, rgba(0.05f, 0.02f, 0.02f, 0.92f * alpha));
-    gfx_outline_rect(x, 35.0f, width, 18.0f, 1.0f,
-                     rgba(1.0f, 0.25f, 0.25f, 0.75f * alpha));
+    art_panel(x, 35.0f, width, 18.0f, 4.0f,
+              rgba(1.0f, 0.25f, 0.22f, 0.85f * alpha), true);
     text_centered((float)BOT_W * 0.5f, 40.0f, 1.0f,
-                  rgba(1.0f, 0.55f, 0.55f, alpha), buf);
+                  rgba(1.0f, 0.62f, 0.58f, alpha), buf);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -599,17 +598,10 @@ static void draw_build_section(const App *app)
     char buf[40];
     int hpLayers = 0, shieldLayers = 0, armorLayers = 0, elites = 0;
 
-    /* next wave button */
-    art_glow(next.x + next.w * 0.5f, next.y + next.h * 0.5f, 100.0f, COL_GREEN,
-             0.10f);
-    gfx_fill_rect(next.x + 3.0f, next.y + 3.0f, next.w, next.h,
-                  rgba(0.0f, 0.0f, 0.0f, 0.35f));
-    gfx_fill_rect(next.x, next.y, next.w, next.h,
-                  rgba(0.13f, 0.45f, 0.20f, 1.0f));
-    gfx_fill_rect(next.x + 3.0f, next.y + 3.0f, next.w - 6.0f, next.h * 0.45f,
-                  rgba(0.40f, 1.00f, 0.50f, 0.12f));
-    gfx_outline_rect(next.x, next.y, next.w, next.h, 2.0f,
-                     rgba(0.45f, 1.00f, 0.50f, 0.70f));
+    /* next wave button: chunky BL2 button with a pulsing green glow */
+    art_comic_button(next.x, next.y, next.w, next.h,
+                     rgba(0.13f, 0.45f, 0.20f, 1.0f), COL_GREEN,
+                     0.65f + 0.35f * (0.5f + 0.5f * sinf(app->time * 2.5f)));
 
     text_centered(next.x + next.w * 0.5f, next.y + 10.0f, 2.0f, COL_WHITE,
                   "NEXT WAVE");
@@ -660,15 +652,16 @@ static void draw_wave_section(const App *app)
     if (frac > 1.0f)
         frac = 1.0f;
 
-    /* chunky progress bar: readable at arm's length on the 240p LCD */
+    /* chunky progress bar: hazard-striped amber fill with a gold keyline */
     gfx_fill_rect(14.0f, 181.0f, 292.0f, 15.0f, rgba(0.10f, 0.10f, 0.18f, 1.0f));
-    gfx_fill_rect(16.0f, 183.0f, 288.0f * frac, 11.0f,
-                  rgba(0.95f, 0.60f, 0.15f, 1.0f));
-    gfx_outline_rect(14.0f, 181.0f, 292.0f, 15.0f, 1.0f,
-                     rgba(0.45f, 0.45f, 0.72f, 0.85f));
+    if (frac > 0.0f)
+        art_hazard_fill(16.0f, 183.0f, 288.0f * frac, 11.0f,
+                        rgba(0.95f, 0.60f, 0.15f, 1.0f),
+                        rgba(0.34f, 0.20f, 0.03f, 0.90f));
+    gfx_outline_rect(14.0f, 181.0f, 292.0f, 15.0f, 1.0f, COL_GOLD);
     snprintf(buf, sizeof(buf), "CLEARED %d%%   LEFT %d", (int)(frac * 100.0f + 0.5f),
              remaining);
-    text_centered(160.0f, 184.0f, 1.0f, rgba(1.0f, 1.0f, 1.0f, 0.96f), buf);
+    text_centered(160.0f, 184.0f, 1.0f, rgba(1.0f, 1.0f, 1.0f, 0.98f), buf);
 
     snprintf(buf, sizeof(buf), "ALIVE %d", g->enemiesAlive);
     gfx_text(14.0f, 200.0f, 1.0f, COL_WHITE, buf);
@@ -706,19 +699,20 @@ static void draw_pause_overlay(void)
     gfx_fill_rect(0.0f, 0.0f, (float)BOT_W, (float)BOT_H,
                   rgba(0.0f, 0.0f, 0.0f, 0.65f));
     fill_panel(panel);
+    art_hazard_strip(62.0f, 31.0f, 14.0f, 5.0f);
+    art_hazard_strip(244.0f, 31.0f, 14.0f, 5.0f);
 
     text_centered(160.0f, 40.0f, 3.0f, COL_WHITE, "PAUSED");
     text_centered(160.0f, 74.0f, 1.0f, COL_MUTED, "THE WAVE IS FROZEN");
 
-    art_glow(resume.x + resume.w * 0.5f, resume.y + resume.h * 0.5f, 90.0f,
-             COL_GREEN, 0.10f);
-    draw_button_frame(resume, rgba(0.12f, 0.40f, 0.18f, 1.0f),
-                      rgba(0.40f, 1.00f, 0.50f, 0.80f), true);
+    art_comic_button(resume.x, resume.y, resume.w, resume.h,
+                     rgba(0.12f, 0.40f, 0.18f, 1.0f), COL_GREEN, 0.85f);
     text_centered(resume.x + resume.w * 0.5f, resume.y + 14.0f, 2.0f, COL_WHITE,
                   "RESUME");
 
-    draw_button_frame(menu, rgba(0.10f, 0.10f, 0.18f, 1.0f),
-                      rgba(0.30f, 0.30f, 0.60f, 0.80f), true);
+    art_comic_button(menu.x, menu.y, menu.w, menu.h,
+                     rgba(0.10f, 0.10f, 0.18f, 1.0f),
+                     rgba(0.45f, 0.45f, 0.75f, 1.0f), 0.55f);
     text_centered(menu.x + menu.w * 0.5f, menu.y + 10.0f, 1.0f, COL_WHITE,
                   "MAIN MENU");
 
@@ -744,8 +738,8 @@ static void draw_result(const App *app)
         seconds = 0;
 
     art_glow(160.0f, 40.0f, 140.0f, victory ? COL_GOLD : COL_RED, 0.12f);
-    text_centered(160.0f, 14.0f, 4.0f, victory ? COL_GOLD_SOFT : COL_RED,
-                  victory ? "VICTORY!" : "GAME OVER");
+    text_comic_centered(160.0f, 14.0f, 4.0f, victory ? COL_GOLD_SOFT : COL_RED,
+                        victory ? "VICTORY!" : "GAME OVER");
     text_centered(160.0f, 52.0f, 1.0f, COL_MUTED,
                   victory ? "ALL WAVES CLEARED" : "THE PATH WAS BREACHED");
 
@@ -758,17 +752,16 @@ static void draw_result(const App *app)
              seconds % 60, g->gold);
     text_centered(160.0f, 103.0f, 1.0f, COL_MUTED, buf);
 
-    art_glow(retry.x + retry.w * 0.5f, retry.y + retry.h * 0.5f, 110.0f,
-             COL_GREEN, 0.12f);
-    draw_button_frame(retry, rgba(0.12f, 0.40f, 0.18f, 1.0f),
-                      rgba(0.40f, 1.00f, 0.50f, 0.80f), true);
+    art_comic_button(retry.x, retry.y, retry.w, retry.h,
+                     rgba(0.12f, 0.40f, 0.18f, 1.0f), COL_GREEN, 0.85f);
     text_centered(retry.x + retry.w * 0.5f, retry.y + 11.0f, 2.0f, COL_WHITE,
                   "PLAY AGAIN");
     text_centered(retry.x + retry.w * 0.5f, retry.y + 38.0f, 1.0f,
-                  rgba(0.85f, 1.00f, 0.90f, 0.80f), "TAP TO RETRY");
+                  rgba(0.85f, 1.00f, 0.90f, 0.90f), "TAP TO RETRY");
 
-    draw_button_frame(menu, rgba(0.10f, 0.10f, 0.18f, 1.0f),
-                      rgba(0.30f, 0.30f, 0.60f, 0.80f), true);
+    art_comic_button(menu.x, menu.y, menu.w, menu.h,
+                     rgba(0.10f, 0.10f, 0.18f, 1.0f),
+                     rgba(0.45f, 0.45f, 0.75f, 1.0f), 0.55f);
     text_centered(menu.x + menu.w * 0.5f, menu.y + 10.0f, 1.0f, COL_WHITE,
                   "MAIN MENU");
 }
