@@ -41,11 +41,9 @@ you can build as long as you like before calling the next one in.
 
 ## Screenshots
 
-Top screen above, touchscreen below. The menu is a capture of the actual `.3dsx` running in Azahar;
-the two gameplay shots come from the game's PC preview harness, which renders through the same
-`game.h`/`gfx.h` frame code as the 3DS backend (so the layout is exactly what the console draws).
+Straight out of Azahar, top screen above and touchscreen below, running the v0.2 build:
 
-| Menu (in Azahar) | Build phase, roadway rerouted | Creeps walking the detour |
+| Menu | Build phase, road walled off and rerouted | Creeps walking the long way round |
 |---|---|---|
 | ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![combat](docs/screenshots/wave.png) |
 
