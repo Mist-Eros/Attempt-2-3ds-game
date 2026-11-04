@@ -7,7 +7,10 @@ build/
 *.cia
 *.map
 *.smdh
-*.bin.tmp
+*.exe
+*.pdb
+*.ilk
+*.obj
 
 # editor / os junk
 .vscode/
@@ -21,3 +24,4 @@ desktop.ini
 *.log
 logs/
 out/
+tools/preview/out/

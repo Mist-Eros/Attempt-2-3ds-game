@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.bmp binary
+*.wav binary
+*.ogg binary
+*.3dsx binary
+*.elf binary
