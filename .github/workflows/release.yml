@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: install audio codec (Tremor Ogg Vorbis music decoder)
-        run: pacman -S --noconfirm --needed 3ds-libvorbisidec
+        run: dkp-pacman -S --noconfirm --needed 3ds-libvorbisidec
 
       - name: build
         run: make
