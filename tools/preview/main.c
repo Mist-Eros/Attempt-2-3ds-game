@@ -349,14 +349,22 @@ static bool any_explosion_beam(const Game *g)
 /* scenarios                                                           */
 /* ------------------------------------------------------------------ */
 
-/* Title screen over time (particles animate). */
+/* Title screen: six moments over the first 2.5 s so the animated redesign
+ * (bobbing element emblems, pulsing prompt/menu copy, drifting background) can
+ * be compared and a good README frame picked; the menu animator runs at 60 Hz. */
 static void scenario_menu(Driver *d)
 {
-    run_frame(d, NULL, true);   /* frame 0  : title screen */
-    idle(d, 59);
-    run_frame(d, NULL, true);   /* frame 60 : +1 s */
-    idle(d, 59);
-    run_frame(d, NULL, true);   /* frame 120: +2 s */
+    static const int captureFrames[] = { 0, 30, 60, 90, 120, 150 };
+    const int captureCount = (int)(sizeof captureFrames / sizeof captureFrames[0]);
+    int next = 0;
+
+    while (d->frame <= captureFrames[captureCount - 1] &&
+           d->frame < d->max_frames) {
+        bool capture = (next < captureCount && d->frame == captureFrames[next]);
+        run_frame(d, NULL, capture);
+        if (capture)
+            ++next;
+    }
 }
 
 /* Menu -> build phase; place one tower of every damage type so the six-button
