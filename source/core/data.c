@@ -230,6 +230,32 @@ float core_enemy_speed(int wave, bool elite)
     return speed;
 }
 
+/*
+ * Enemy movement speed in cells per second - DELIBERATE DEVIATION from the Lua.
+ *
+ * The original moved enemies with t += dt*speed/100 where t was normalised over
+ * the whole path, so a longer (mazed) path was walked in exactly the same
+ * 100/speed seconds: mazing bought the player literally no extra tower time.
+ * That defeats the maze-building mechanic, so the port moves enemies at an
+ * absolute speed and a detour really is extra time under fire.
+ *
+ * kEnemySpeedScale is the single balance knob:
+ *   0.25 -> wave 1 = 5 cells/s, i.e. 5 s across the initial 25-cell straight
+ *           road (same crossing time the original had), and a 60-cell maze
+ *           costs 12 s at wave 1. Tune this and nothing else.
+ */
+static const float kEnemySpeedScale = 0.25f;
+
+float core_enemy_speed_cells(int wave, bool elite)
+{
+    return core_enemy_speed(wave, elite) * kEnemySpeedScale;
+}
+
+float core_enemy_speed_scale(void)
+{
+    return kEnemySpeedScale;
+}
+
 int core_wave_elite_delays(int wave, float *out, int max)
 {
     int count = 0;

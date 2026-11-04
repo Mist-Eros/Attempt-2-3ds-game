@@ -109,19 +109,75 @@ static void put_enemy(Game *g, int slot, int element, float pathPos, float hp)
 }
 
 /*
- * One level-1 tower on (0,0), wave 1 started, no queued spawns, no enemies.
+ * One level-1 tower beside the road at (0,11) (centre (0.5,11.5), the road runs
+ * along row 12), wave 1 started, no queued spawns, no enemies.
  * Clear the enemy array afterwards with put_enemy() if a test wants exactly one.
  */
 static void setup_single_tower(Game *g)
 {
     game_new_run(g, 7u);
-    game_place_tower(g, 0, 0); /* centre (0.5,0.5); the top leg is row 1 */
+    game_place_tower(g, 0, 11);
     game_start_next_wave(g);
     g->enemiesToSpawn = 0;
     g->elitePending = 0;
     g->eliteDelayCount = 0;
     g->enemiesAlive = 0;
     g->towers[0].cooldown = 0.0f;
+}
+
+/* Is (col,row) one of the cells of the current road? */
+static bool path_has_cell(const Game *g, int col, int row)
+{
+    int i;
+    for (i = 0; i < g->path.count; ++i) {
+        if (g->path.pts[i].x == (float)col + 0.5f &&
+            g->path.pts[i].y == (float)row + 0.5f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Assert the current road is legal: entrance -> exit, 4-connected, no repeated
+ * cell, no tower standing on it, and length == count-1.
+ */
+static void check_path_integrity(const Game *g)
+{
+    int8_t seen[GRID_ROWS][GRID_COLS];
+    int i;
+
+    CHECK(g->path.count >= 2);
+    CHECK(g->path.count <= MAX_PATH_CELLS);
+    CHECK_NEAR(g->path.length, (float)(g->path.count - 1), 1e-6f);
+    CHECK_NEAR(g->path.pts[0].x, 0.5f, 1e-6f);
+    CHECK_NEAR(g->path.pts[0].y, 12.5f, 1e-6f);
+    CHECK_NEAR(g->path.pts[g->path.count - 1].x, 25.5f, 1e-6f);
+    CHECK_NEAR(g->path.pts[g->path.count - 1].y, 12.5f, 1e-6f);
+
+    memset(seen, 0, sizeof seen);
+    for (i = 0; i < g->path.count; ++i) {
+        int col = (int)(g->path.pts[i].x - 0.5f);
+        int row = (int)(g->path.pts[i].y - 0.5f);
+
+        CHECK(col >= 0 && col < GRID_COLS);
+        CHECK(row >= 0 && row < GRID_ROWS);
+        if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) {
+            continue;
+        }
+        CHECK(g->path.pts[i].x == (float)col + 0.5f);
+        CHECK(g->path.pts[i].y == (float)row + 0.5f);
+        CHECK(seen[row][col] == 0); /* no cell repeats */
+        seen[row][col] = 1;
+        CHECK(g->occupancy[row][col] == 0); /* never route through a tower */
+        if (i > 0) {
+            int dx = (int)(g->path.pts[i].x - g->path.pts[i - 1].x);
+            int dy = (int)(g->path.pts[i].y - g->path.pts[i - 1].y);
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            CHECK(dx + dy == 1);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -214,69 +270,254 @@ static void test_damage_multiplier_matrix(void)
 /* path and grid                                                      */
 /* ------------------------------------------------------------------ */
 
-static void test_fixed_path(void)
+static void test_initial_path(void)
 {
     Game g;
     int i;
-    int8_t seen[GRID_ROWS][GRID_COLS];
-    float expectedWaypoints[][2] = {
-        { 0.5f, 1.5f },  { 23.5f, 1.5f }, { 23.5f, 2.5f },
-        { 23.5f, 5.5f }, { 22.5f, 5.5f }, { 2.5f, 5.5f },
-        { 2.5f, 6.5f },  { 2.5f, 9.5f },  { 3.5f, 9.5f },
-        { 25.5f, 9.5f }
-    };
-    int waypointCells[] = { 0, 23, 24, 27, 28, 48, 49, 52, 53, 75 };
 
     begin(&g, 1234u);
 
+    /* Empty board: the BFS road is the straight row-12 corridor. */
     CHECK(g.pathBlocked == false);
-    CHECK(g.path.count == 76);
-    CHECK_NEAR(game_path_length(&g), 75.0f, 1e-6f);
-    CHECK(g.path.count <= MAX_PATH_CELLS);
-
-    memset(seen, 0, sizeof seen);
+    CHECK(g.path.count == 26);
+    CHECK_NEAR(game_path_length(&g), 25.0f, 1e-6f);
     for (i = 0; i < g.path.count; ++i) {
-        int col = (int)(g.path.pts[i].x - 0.5f);
-        int row = (int)(g.path.pts[i].y - 0.5f);
-        CHECK(g.path.pts[i].x == (float)col + 0.5f);
-        CHECK(g.path.pts[i].y == (float)row + 0.5f);
-        CHECK(col >= 0 && col < GRID_COLS);
-        CHECK(row >= 0 && row < GRID_ROWS);
-        if (col >= 0 && col < GRID_COLS && row >= 0 && row < GRID_ROWS) {
-            CHECK(!seen[row][col]); /* no cell repeats */
-            seen[row][col] = 1;
+        CHECK_NEAR(g.path.pts[i].x, (float)i + 0.5f, 1e-6f);
+        CHECK_NEAR(g.path.pts[i].y, 12.5f, 1e-6f);
+    }
+    check_path_integrity(&g);
+}
+
+static void test_build_on_road_reroutes(void)
+{
+    Game g;
+
+    begin(&g, 11u);
+    CHECK(g.path.count == 26);
+    /* Towers may be built on the road now - that is the maze mechanic. */
+    CHECK(game_can_place_at(&g, 7, 12, 0) == true);
+    CHECK(game_place_tower(&g, 7, 12) == true);
+    CHECK(g.towerCount == 1);
+    CHECK(g.gold == STARTING_GOLD - 20);
+    CHECK(game_tower_at(&g, 7, 12) == 0);
+
+    /* The road detours around the new wall: 25 segments becomes 27. */
+    CHECK(game_path_length(&g) > 25.0f);
+    CHECK_NEAR(game_path_length(&g), 27.0f, 1e-6f);
+    CHECK(path_has_cell(&g, 7, 12) == false);
+    check_path_integrity(&g);
+
+    /* The detour is still a legal enemy route (one row up or down). */
+    CHECK(path_has_cell(&g, 7, 11) || path_has_cell(&g, 7, 13));
+}
+
+static void test_blocking_placement_refused(void)
+{
+    Game g;
+
+    begin(&g, 12u);
+    /* The exit (25,12) is the bottom-right corner, so it has only two
+     * neighbours: (24,12) and (25,11). Fence one of them in, then the other
+     * would seal the exit and must be refused. */
+    CHECK(game_place_tower(&g, 24, 12) == true);
+    CHECK(g.gold == STARTING_GOLD - 20);
+    CHECK(g.towerCount == 1);
+
+    CHECK(game_can_place_at(&g, 25, 11, 0) == false);
+    game_clear_message(&g);
+    CHECK(game_place_tower(&g, 25, 11) == false);
+    CHECK(text_contains(g.message, "block"));
+
+    /* Nothing may have changed: no gold spent, no tower, road intact. */
+    CHECK(g.gold == STARTING_GOLD - 20);
+    CHECK(g.towerCount == 1);
+    CHECK(g.occupancy[11][25] == 0);
+    CHECK(game_tower_at(&g, 25, 11) == -1);
+    CHECK(g.path.count > 0);
+    check_path_integrity(&g);
+
+    /* Selling the fence reopens the blocked cell. */
+    game_select_tower(&g, 0);
+    CHECK(game_sell_selected(&g) == true);
+    CHECK(game_can_place_at(&g, 25, 11, 0) == true);
+}
+
+static void test_entrance_exit_rejected(void)
+{
+    Game g;
+
+    begin(&g, 13u);
+    CHECK(game_can_place_at(&g, 0, 12, 0) == false);
+    CHECK(game_can_place_at(&g, 25, 12, 0) == false);
+
+    game_clear_message(&g);
+    CHECK(game_place_tower(&g, 0, 12) == false);
+    CHECK(text_contains(g.message, "entrance"));
+
+    game_clear_message(&g);
+    CHECK(game_place_tower(&g, 25, 12) == false);
+    CHECK(text_contains(g.message, "exit"));
+
+    CHECK(g.towerCount == 0);
+    CHECK(g.gold == STARTING_GOLD);
+    check_path_integrity(&g);
+}
+
+static void test_sell_shortens_path(void)
+{
+    Game g;
+
+    begin(&g, 14u);
+    CHECK(game_place_tower(&g, 7, 12) == true);
+    CHECK_NEAR(game_path_length(&g), 27.0f, 1e-6f);
+    CHECK(path_has_cell(&g, 7, 12) == false);
+
+    game_select_tower(&g, 0);
+    CHECK(game_sell_selected(&g) == true);
+    CHECK_NEAR(game_path_length(&g), 25.0f, 1e-6f);
+    CHECK(path_has_cell(&g, 7, 12) == true);
+    CHECK(g.gold == STARTING_GOLD - 20 + 15);
+    check_path_integrity(&g);
+}
+
+/* Build a serpentine wall pattern and check the road really becomes long. */
+static void test_maze_long_route(void)
+{
+    Game g;
+    int row;
+
+    begin(&g, 15u);
+    g.gold = 1000000;
+
+    /* Wall at col 4, gap row 0. */
+    for (row = 12; row >= 1; --row) {
+        CHECK(game_place_tower(&g, 4, row) == true);
+    }
+    /* Wall at col 8, gap row 12. */
+    for (row = 0; row <= 11; ++row) {
+        CHECK(game_place_tower(&g, 8, row) == true);
+    }
+    /* Wall at col 12, gap row 0. */
+    for (row = 12; row >= 1; --row) {
+        CHECK(game_place_tower(&g, 12, row) == true);
+    }
+    /* Wall at col 16, gap row 12. */
+    for (row = 0; row <= 11; ++row) {
+        CHECK(game_place_tower(&g, 16, row) == true);
+    }
+
+    CHECK(g.towerCount == 48);
+    CHECK(g.pathBlocked == false);
+    check_path_integrity(&g);
+    CHECK(game_path_length(&g) > 60.0f);
+}
+
+/* Absolute speed: the same wave/same enemies move at the same cells/second no
+ * matter how long the road is, so a longer maze really buys tower time. */
+static void test_speed_independent_of_path_length(void)
+{
+    Game straight;
+    Game maze;
+    int row;
+
+    begin(&straight, 16u);
+    game_start_next_wave(&straight);
+    straight.enemiesToSpawn = 0;
+    straight.elitePending = 0;
+    straight.eliteDelayCount = 0;
+    put_enemy(&straight, 0, ELEMENT_FIRE, 0.0f, 100000.0f);
+    straight.enemiesAlive = 1;
+    run_steps(&straight, 60);
+    /* Wave 1: 20 original speed units * SPEED_SCALE 0.25 = 5 cells/s. */
+    CHECK_NEAR(straight.enemies[0].pathPos, 5.0f, 0.05f);
+
+    begin(&maze, 17u);
+    maze.gold = 1000000;
+    for (row = 1; row <= 12; ++row) {
+        CHECK(game_place_tower(&maze, 7, row) == true); /* wall, gap row 0 */
+    }
+    CHECK(game_path_length(&maze) > 25.0f);
+    game_start_next_wave(&maze);
+    maze.enemiesToSpawn = 0;
+    maze.elitePending = 0;
+    maze.eliteDelayCount = 0;
+    put_enemy(&maze, 0, ELEMENT_FIRE, 0.0f, 100000.0f);
+    maze.enemiesAlive = 1;
+    run_steps(&maze, 60);
+
+    /* Same 60 steps -> same distance travelled, despite the longer road. */
+    CHECK_NEAR(maze.enemies[0].pathPos, 5.0f, 0.05f);
+    CHECK_NEAR(maze.enemies[0].pathPos, straight.enemies[0].pathPos, 0.05f);
+    CHECK(maze.path.length > straight.path.length + 20.0f);
+}
+
+/* Mid-wave build reroutes + re-projects walking enemies with no teleport/crash. */
+static void test_enemy_reprojection_on_build(void)
+{
+    Game g;
+    int i;
+    int guard;
+    int activeBefore;
+
+    begin(&g, 18u);
+    game_start_next_wave(&g);
+    for (guard = 0; guard < 3000 && g.enemiesAlive < 2; ++guard) {
+        game_step(&g, 1.0f / 60.0f);
+    }
+    CHECK(g.enemiesAlive >= 2);
+
+    activeBefore = 0;
+    for (i = 0; i < MAX_ENEMIES; ++i) {
+        if (g.enemies[i].active) {
+            ++activeBefore;
         }
     }
+    CHECK(activeBefore >= 2);
 
-    /* Start, end and the corners of the serpentine. */
-    CHECK_NEAR(g.path.pts[0].x, 0.5f, 1e-6f);
-    CHECK_NEAR(g.path.pts[0].y, 1.5f, 1e-6f);
-    CHECK_NEAR(g.path.pts[g.path.count - 1].x, 25.5f, 1e-6f);
-    CHECK_NEAR(g.path.pts[g.path.count - 1].y, 9.5f, 1e-6f);
+    /* Wall off the road ahead of the walking enemies. */
+    CHECK(game_place_tower(&g, 18, 12) == true);
+    CHECK(game_path_length(&g) > 25.0f);
+    CHECK(path_has_cell(&g, 18, 12) == false);
+    check_path_integrity(&g);
+    CHECK(g.enemiesAlive == activeBefore); /* nobody vanished or respawned */
 
-    for (i = 0; i < 10; ++i) {
-        int cell = waypointCells[i];
-        CHECK_NEAR(g.path.pts[cell].x, expectedWaypoints[i][0], 1e-6f);
-        CHECK_NEAR(g.path.pts[cell].y, expectedWaypoints[i][1], 1e-6f);
+    for (i = 0; i < MAX_ENEMIES; ++i) {
+        Enemy *e = &g.enemies[i];
+        if (!e->active) {
+            continue;
+        }
+        CHECK(isfinite(e->x));
+        CHECK(isfinite(e->y));
+        CHECK(e->pathPos >= 0.0f);
+        CHECK(e->pathPos <= g.path.length);
+        CHECK(e->x >= -1.0f && e->x <= (float)GRID_COLS + 1.0f);
+        CHECK(e->y >= -1.0f && e->y <= (float)GRID_ROWS + 1.0f);
     }
 
-    /* Every consecutive pair must be 4-connected. */
-    for (i = 1; i < g.path.count; ++i) {
-        int dx = (int)(g.path.pts[i].x - g.path.pts[i - 1].x);
-        int dy = (int)(g.path.pts[i].y - g.path.pts[i - 1].y);
-        if (dx < 0) dx = -dx;
-        if (dy < 0) dy = -dy;
-        CHECK(dx + dy == 1);
-    }
+    /* Selling the wall mid-wave must re-path + re-project just as cleanly. */
+    game_select_tower(&g, 0);
+    CHECK(game_sell_selected(&g) == true);
+    CHECK_NEAR(game_path_length(&g), 25.0f, 1e-6f);
+    check_path_integrity(&g);
+    CHECK(g.enemiesAlive == activeBefore);
 
-    /* Path cells are blocked for building, off-path cells are not. */
-    CHECK(game_can_place_at(&g, 0, 1, 0) == false);
-    CHECK(game_can_place_at(&g, 23, 5, 0) == false);
-    CHECK(game_can_place_at(&g, 2, 9, 0) == false);
-    CHECK(game_can_place_at(&g, 25, 9, 0) == false);
-    CHECK(game_can_place_at(&g, 0, 0, 0) == true);
-    CHECK(game_can_place_at(&g, 12, 2, 0) == true);
-    CHECK(game_can_place_at(&g, 25, 12, 0) == true);
+    /* Put a wall back so the rest of the wave has to walk around it. */
+    CHECK(game_place_tower(&g, 12, 12) == true);
+    check_path_integrity(&g);
+
+    /* The wave must still resolve; nothing may freeze or go NaN. */
+    for (guard = 0; guard < 60000 && g.phase == PHASE_WAVE; ++guard) {
+        game_step(&g, 1.0f / 60.0f);
+        for (i = 0; i < MAX_ENEMIES; ++i) {
+            if (!g.enemies[i].active) {
+                continue;
+            }
+            CHECK(isfinite(g.enemies[i].x));
+            CHECK(isfinite(g.enemies[i].y));
+            CHECK(g.enemies[i].pathPos <= g.path.length + 0.01f);
+        }
+    }
+    CHECK(g.phase == PHASE_BUILD);
 }
 
 static void test_cell_center(void)
@@ -329,19 +570,31 @@ static void test_placement_rules(void)
     CHECK(text_contains(g.message, "occupied"));
     CHECK(g.towerCount == 1);
 
-    /* Path cell rejected with a specific message. */
+    /* Road cells are buildable now (maze mechanic) - so is (5,12), and it
+     * reroutes the road around the new tower. */
     game_clear_message(&g);
-    CHECK(game_place_tower(&g, 5, 1) == false);
-    CHECK(text_contains(g.message, "path"));
-    CHECK(g.towerCount == 1);
-    CHECK(g.gold == STARTING_GOLD - 20);
+    CHECK(game_can_place_at(&g, 5, 12, 0) == true);
+    CHECK(game_place_tower(&g, 5, 12) == true);
+    CHECK(g.towerCount == 2);
+    CHECK(g.gold == STARTING_GOLD - 40);
+    CHECK(path_has_cell(&g, 5, 12) == false);
+    CHECK(game_path_length(&g) > 25.0f);
+    check_path_integrity(&g);
+
+    /* Entrance and exit are the only cells that reject for being on the road. */
+    game_clear_message(&g);
+    CHECK(game_place_tower(&g, 0, 12) == false);
+    CHECK(text_contains(g.message, "entrance"));
+    CHECK(game_place_tower(&g, 25, 12) == false);
+    CHECK(g.towerCount == 2);
+    CHECK(g.gold == STARTING_GOLD - 40);
 
     /* Out of bounds rejected. */
     game_clear_message(&g);
     CHECK(game_place_tower(&g, -1, 0) == false);
     CHECK(g.message[0] != '\0');
     CHECK(game_place_tower(&g, 0, GRID_ROWS) == false);
-    CHECK(g.towerCount == 1);
+    CHECK(g.towerCount == 2);
 
     /* Tower selection from the grid. */
     CHECK(game_tower_at(&g, 0, 1) == -1);
@@ -774,11 +1027,11 @@ static void test_enemy_movement_speed(void)
     put_enemy(&g, 0, ELEMENT_FIRE, 0.0f, 1000.0f);
     g.enemiesAlive = 1;
 
-    /* Wave 1: speed 20, path length 75 -> 15 cells per second. */
+    /* Wave 1: 20 original units * SPEED_SCALE 0.25 = 5 cells per second. */
     run_steps(&g, 60);
-    CHECK_NEAR(g.enemies[0].pathPos, 15.0f, 0.1f);
-    CHECK_NEAR(g.enemies[0].x, 15.5f, 0.1f);
-    CHECK_NEAR(g.enemies[0].y, 1.5f, 1e-5f);
+    CHECK_NEAR(g.enemies[0].pathPos, 5.0f, 0.05f);
+    CHECK_NEAR(g.enemies[0].x, 5.5f, 0.05f);
+    CHECK_NEAR(g.enemies[0].y, 12.5f, 1e-5f);
 }
 
 static void test_leak_costs_life(void)
@@ -790,7 +1043,7 @@ static void test_leak_costs_life(void)
     g.enemiesToSpawn = 0;
     g.elitePending = 0;
     g.eliteDelayCount = 0;
-    put_enemy(&g, 0, ELEMENT_FIRE, 75.0f - 0.1f, 1000.0f);
+    put_enemy(&g, 0, ELEMENT_FIRE, g.path.length - 0.01f, 1000.0f);
     g.enemiesAlive = 1;
     g.events = 0;
 
@@ -989,7 +1242,7 @@ static void test_pause(void)
     CHECK_NEAR(g.waveTime, frozenWaveTime, 1e-6f);
 
     /* UI messages still expire while paused. */
-    game_place_tower(&g, 5, 1); /* path cell -> message */
+    game_place_tower(&g, 0, 12); /* entrance -> message */
     CHECK(g.message[0] != '\0');
     run_steps(&g, 120); /* 2 s of message timer */
     CHECK(g.message[0] == '\0');
@@ -1001,7 +1254,7 @@ static void test_pause(void)
     CHECK_NEAR(g.waveTime, 2.0f, 1e-4f);
 
     /* game_update() also ticks messages while paused. */
-    game_place_tower(&g, 5, 1);
+    game_place_tower(&g, 0, 12);
     CHECK(g.messageTimer > 0.0f);
     game_toggle_pause(&g);
     {
@@ -1072,7 +1325,7 @@ static void test_events(void)
     CHECK((g.events & GAME_EVT_SELL) != 0u);
 
     game_clear_events(&g);
-    game_place_tower(&g, 0, 0);
+    game_place_tower(&g, 0, 11); /* beside the road, within range of spawn */
     game_start_next_wave(&g);
     CHECK((g.events & GAME_EVT_WAVE_START) != 0u);
 
@@ -1096,17 +1349,17 @@ static void test_messages(void)
     CHECK(g.message[0] == '\0');
     CHECK(g.messageTimer == 0.0f);
 
-    CHECK(game_place_tower(&g, 0, 1) == false); /* path cell */
+    CHECK(game_place_tower(&g, 0, 12) == false); /* entrance */
     CHECK(g.message[0] != '\0');
     CHECK_NEAR(g.messageTimer, 1.5f, 1e-6f);
-    CHECK(text_contains(g.message, "path"));
+    CHECK(text_contains(g.message, "entrance"));
 
     game_clear_message(&g);
     CHECK(g.message[0] == '\0');
     CHECK(g.messageTimer == 0.0f);
 
     /* Messages expire on their own (BUILD phase still ticks the timer). */
-    CHECK(game_place_tower(&g, 0, 1) == false);
+    CHECK(game_place_tower(&g, 0, 12) == false);
     run_steps(&g, 100); /* 1.667 s */
     CHECK(g.message[0] == '\0');
     CHECK(g.messageTimer <= 0.0f);
@@ -1219,7 +1472,14 @@ int main(void)
     RUN_TEST(test_tower_specs);
     RUN_TEST(test_tower_stats_per_level);
     RUN_TEST(test_damage_multiplier_matrix);
-    RUN_TEST(test_fixed_path);
+    RUN_TEST(test_initial_path);
+    RUN_TEST(test_build_on_road_reroutes);
+    RUN_TEST(test_blocking_placement_refused);
+    RUN_TEST(test_entrance_exit_rejected);
+    RUN_TEST(test_sell_shortens_path);
+    RUN_TEST(test_maze_long_route);
+    RUN_TEST(test_speed_independent_of_path_length);
+    RUN_TEST(test_enemy_reprojection_on_build);
     RUN_TEST(test_cell_center);
     RUN_TEST(test_placement_rules);
     RUN_TEST(test_placement_affordability);

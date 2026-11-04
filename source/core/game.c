@@ -142,15 +142,12 @@ static int spawn_enemy(Game *g, bool elite, int element)
     return slot;
 }
 
-/* Cells per second. The original moved enemies by t += dt*speed/100, where t
- * runs 0..1 over the whole path, so in cell space they cross speed/100 times
- * the path length each second. */
+/* Absolute movement speed in cells per second (see core_enemy_speed_cells():
+ * the original normalised speed over the path, which made mazing pointless;
+ * this port deliberately does not). */
 static float enemy_speed_cells(const Game *g, bool elite)
 {
-    if (g->path.length <= 0.0f) {
-        return 0.0f;
-    }
-    return (core_enemy_speed(g->wave, elite) / 100.0f) * g->path.length;
+    return core_enemy_speed_cells(g->wave, elite);
 }
 
 /*
@@ -491,6 +488,78 @@ static void compact_enemies(Game *g)
     g->enemiesAlive = write;
 }
 
+/*
+ * Road changes (build/sell) can leave every living enemy on a completely
+ * different polyline. Move each one to the nearest point on the new road and
+ * keep its progress there: it must keep marching from wherever it stands, not
+ * snap back to the entrance. Segments are one cell long, so pathPos is simply
+ * segment index + clamped projection factor, i.e. still a distance in cells.
+ */
+static float project_onto_path(const Path *path, float x, float y)
+{
+    float bestDistSq = 1.0e30f;
+    float bestT = 0.0f;
+    int i;
+
+    if (!path || path->count < 2) {
+        return 0.0f;
+    }
+
+    for (i = 0; i + 1 < path->count; ++i) {
+        Vec2 a = path->pts[i];
+        Vec2 b = path->pts[i + 1];
+        float dx = b.x - a.x;
+        float dy = b.y - a.y;
+        float lenSq = dx * dx + dy * dy;
+        float t;
+        float px;
+        float py;
+        float ex;
+        float ey;
+        float distSq;
+
+        if (lenSq <= 0.0f) {
+            continue;
+        }
+        t = ((x - a.x) * dx + (y - a.y) * dy) / lenSq;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        px = a.x + dx * t;
+        py = a.y + dy * t;
+        ex = x - px;
+        ey = y - py;
+        distSq = ex * ex + ey * ey;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestT = (float)i + t;
+        }
+    }
+
+    if (bestT < 0.0f) bestT = 0.0f;
+    if (bestT > path->length) bestT = path->length;
+    return bestT;
+}
+
+static void reproject_enemies(Game *g)
+{
+    Vec2 pos;
+    int i;
+
+    if (g->path.count < 2) {
+        return;
+    }
+    for (i = 0; i < MAX_ENEMIES; ++i) {
+        Enemy *e = &g->enemies[i];
+        if (!e->active) {
+            continue;
+        }
+        e->pathPos = project_onto_path(&g->path, e->x, e->y);
+        core_path_position(&g->path, e->pathPos, &pos);
+        e->x = pos.x;
+        e->y = pos.y;
+    }
+}
+
 static void check_wave_complete(Game *g)
 {
     if (g->phase != PHASE_WAVE) {
@@ -548,8 +617,8 @@ void game_new_run(Game *g, uint32_t seed)
     g->speedMultiplier = 1.0f;
     g->rng = (seed != 0u) ? seed : 0x9E3779B9u;
 
-    /* One fixed path per run. Towers can never invalidate it because they
-     * cannot be built on path cells at all. */
+    /* On an empty board the BFS finds the straight row-12 corridor:
+     * 26 cells, 25 segments. Every later build/sell re-runs it. */
     g->pathBlocked = (core_build_path(g) < 2);
     g->spawnInterval = core_wave_spawn_interval(g->wave);
 }
@@ -645,6 +714,15 @@ void game_step(Game *g, float dt)
 /* player actions                                                     */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Build a tower. Towers MAY stand on the road (that is the maze mechanic) -
+ * every empty cell except the entrance and the exit is fair game - but a build
+ * that would make the exit unreachable is refused and costs nothing.
+ *
+ * Messages (front end may show g->message): "can't build now", "can't build
+ * there", "can't build on the entrance", "can't build on the exit", "cell
+ * occupied", "tower limit", "that would block the path", "not enough gold".
+ */
 bool game_place_tower(Game *g, int col, int row)
 {
     const TowerSpec *spec;
@@ -672,12 +750,12 @@ bool game_place_tower(Game *g, int col, int row)
         set_message(g, "can't build there");
         return false;
     }
-    if (g->path.count < 2) {
-        set_message(g, "can't build there");
+    if (col == CORE_START_COL && row == CORE_START_ROW) {
+        set_message(g, "can't build on the entrance");
         return false;
     }
-    if (core_path_contains(g, col, row)) {
-        set_message(g, "can't build on the path");
+    if (col == CORE_GOAL_COL && row == CORE_GOAL_ROW) {
+        set_message(g, "can't build on the exit");
         return false;
     }
     if (g->occupancy[row][col] != 0) {
@@ -686,6 +764,12 @@ bool game_place_tower(Game *g, int col, int row)
     }
     if (g->towerCount >= MAX_TOWERS) {
         set_message(g, "tower limit");
+        return false;
+    }
+    /* Maze rule: refuse a build that would cut the exit off. This only runs the
+     * BFS on a hypothetical board, nothing is mutated yet. */
+    if (!core_path_exists(g, col, row)) {
+        set_message(g, "that would block the path");
         return false;
     }
     if (g->gold < spec->cost) {
@@ -709,6 +793,23 @@ bool game_place_tower(Game *g, int col, int row)
     g->occupancy[row][col] = (int8_t)(index + 1);
     g->gold -= spec->cost;
     g->selectedTower = index;
+
+    /* The road changed: rebuild it and re-project the enemies already walking.
+     * core_path_exists() above guarantees this succeeds; keep the rollback
+     * anyway so a future rule change can never corrupt the board. */
+    if (core_build_path(g) < 2) {
+        g->occupancy[row][col] = 0;
+        memset(tower, 0, sizeof *tower);
+        --g->towerCount;
+        g->gold += spec->cost;
+        g->selectedTower = -1;
+        core_build_path(g);
+        reproject_enemies(g);
+        set_message(g, "that would block the path");
+        return false;
+    }
+    reproject_enemies(g);
+
     g->events |= GAME_EVT_BUILD;
     return true;
 }
@@ -778,6 +879,11 @@ bool game_sell_selected(Game *g)
     --g->towerCount;
     memset(&g->towers[g->towerCount], 0, sizeof g->towers[g->towerCount]);
     rebuild_occupancy(g);
+
+    /* Removing a wall can only make the road shorter, never seal it. Re-path
+     * and re-project the enemies so the shortcut is actually walked. */
+    core_build_path(g);
+    reproject_enemies(g);
 
     g->selectedTower = -1;
     g->events |= GAME_EVT_SELL;

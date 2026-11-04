@@ -1,33 +1,31 @@
 /*
- * Elemental Defense - grid and the fixed road.
+ * Elemental Defense - grid and the maze road.
  *
- * History: the LÖVE original ran a breadth-first search after every build, so
- * blocking the path rerouted the enemies (main.lua:63-123). We deliberately
- * dropped that whole mechanic. This port has ONE hand-authored serpentine road
- * and towers can never be built on it, so the path is fixed for a whole run:
- * no re-pathing, no "path blocked" rejection state, no enemy re-mapping.
+ * The road is NOT fixed: this is the maze-building game. Exactly like the LÖVE
+ * original (main.lua:63-123), a 4-connected breadth-first search from the
+ * entrance (0,12) to the exit (25,12) runs whenever the board changes. Towers
+ * may stand on the road, and a tower that would make the exit unreachable is a
+ * refused placement - so the player builds walls on the road to force the
+ * enemies around a longer detour. The BFS is nearest-cells-first and expands
+ * neighbours up, down, left, right in that order, matching the original, which
+ * also makes the result deterministic (ties resolve the same way every time).
  *
- * Why a serpentine road: tower range is 60 original px = 60/28 ~ 2.14 cells.
- * A straight line across row 12 could only ever be covered by two rows of
- * towers, which makes the 26x13 board pointless. The road below snakes across
- * five rows instead, so most of the board is useful build space.
- *
- * The road (start at the left end of the top leg, goal at the right end of the
- * bottom leg), 76 cells / 75 segments:
- *
- *   row 1:  (0,1) -> (23,1)     24 cells, left to right
- *   col 23: (23,2) -> (23,5)     4 cells, down
- *   row 5:  (22,5) -> (2,5)     21 cells, right to left
- *   col 2:  (2,6) -> (2,9)       4 cells, down
- *   row 9:  (3,9) -> (25,9)     23 cells, left to right
- *
- * Every consecutive pair of cells is 4-connected, so enemies simply walk the
- * cell centres and the renderer draws the polyline through them.
+ * The found cells are stored as cell centres in g->path; path.length is
+ * count-1 cells. game.c re-projects live enemies onto the new polyline after
+ * every successful build/sell so they keep walking from where they stand
+ * instead of snapping back to the entrance.
  */
 #include <string.h>
 
 #include "game.h"
 #include "core_internal.h"
+
+#define CELL_INDEX(col, row) ((row) * GRID_COLS + (col))
+#define CELL_COL(index)      ((index) % GRID_COLS)
+#define CELL_ROW(index)      ((index) / GRID_COLS)
+#define CELL_COUNT           (GRID_COLS * GRID_ROWS)
+
+#define NO_BLOCK (-1)
 
 Vec2 game_cell_center(int col, int row)
 {
@@ -42,62 +40,175 @@ float game_path_length(const Game *g)
     return g ? g->path.length : 0.0f;
 }
 
-static void push_path_cell(Path *path, int *count, int col, int row)
+/* A cell is a wall when a tower stands there, or when the caller asks us to
+ * pretend one does (that is how placement legality / the maze AI are checked
+ * without mutating the board). */
+static bool cell_is_wall(const Game *g, int col, int row,
+                         int blockCol, int blockRow)
 {
-    if (*count >= MAX_PATH_CELLS) {
-        return;
+    if (col == blockCol && row == blockRow) {
+        return true;
     }
-    path->pts[*count] = game_cell_center(col, row);
-    ++(*count);
+    return g->occupancy[row][col] != 0;
+}
+
+/*
+ * Breadth-first search from the entrance to the exit. Returns the number of
+ * cells on the shortest route (0 when the exit is unreachable). When outPath is
+ * non-NULL the route is written into it, entrance first.
+ */
+static int bfs_route(const Game *g, int blockCol, int blockRow, Path *outPath)
+{
+    int8_t visited[GRID_ROWS][GRID_COLS];
+    int16_t parent[CELL_COUNT];
+    int16_t queue[CELL_COUNT];
+    int head;
+    int tail;
+    int start;
+    int goal;
+    int found;
+    int i;
+
+    for (i = 0; i < CELL_COUNT; ++i) {
+        parent[i] = -1;
+    }
+    memset(visited, 0, sizeof visited);
+
+    start = CELL_INDEX(CORE_START_COL, CORE_START_ROW);
+    goal = CELL_INDEX(CORE_GOAL_COL, CORE_GOAL_ROW);
+
+    head = 0;
+    tail = 0;
+    queue[tail++] = (int16_t)start;
+    visited[CORE_START_ROW][CORE_START_COL] = 1;
+    found = 0;
+
+    while (head < tail) {
+        int16_t current = queue[head++];
+        int col;
+        int row;
+        int n;
+
+        if (current == goal) {
+            found = 1;
+            break;
+        }
+
+        col = CELL_COL(current);
+        row = CELL_ROW(current);
+
+        /* Same expansion order as main.lua:84-89: up, down, left, right. */
+        for (n = 0; n < 4; ++n) {
+            int nc = col;
+            int nr = row;
+
+            if (n == 0) nr = row - 1;
+            else if (n == 1) nr = row + 1;
+            else if (n == 2) nc = col - 1;
+            else nc = col + 1;
+
+            if (nc < 0 || nc >= GRID_COLS || nr < 0 || nr >= GRID_ROWS) {
+                continue;
+            }
+            if (visited[nr][nc]) {
+                continue;
+            }
+            if (cell_is_wall(g, nc, nr, blockCol, blockRow)) {
+                continue;
+            }
+
+            visited[nr][nc] = 1;
+            parent[CELL_INDEX(nc, nr)] = current;
+            queue[tail++] = (int16_t)CELL_INDEX(nc, nr);
+        }
+    }
+
+    if (!found) {
+        return 0;
+    }
+
+    /* Walk parents back from the goal; that gives goal -> start, so fill the
+     * output from the back. */
+    {
+        int16_t walk = (int16_t)goal;
+        int count = 0;
+
+        while (walk >= 0 && count < MAX_PATH_CELLS) {
+            ++count;
+            if (walk == start) {
+                break;
+            }
+            walk = parent[walk];
+        }
+        if (walk != start || count > MAX_PATH_CELLS) {
+            return 0; /* cannot happen on a valid board, but do not trust it */
+        }
+
+        if (outPath) {
+            walk = (int16_t)goal;
+            outPath->count = count;
+            for (i = count - 1; i >= 0; --i) {
+                outPath->pts[i] = game_cell_center(CELL_COL(walk), CELL_ROW(walk));
+                if (walk == start) {
+                    break;
+                }
+                walk = parent[walk];
+            }
+            outPath->length = (float)(count - 1);
+        }
+        return count;
+    }
 }
 
 int core_build_path(Game *g)
 {
-    Path *path;
     int count;
-    int col;
-    int row;
 
     if (!g) {
         return 0;
     }
 
-    path = &g->path;
-    path->count = 0;
-    path->length = 0.0f;
-    count = 0;
-
-    /* Top leg, left to right. */
-    for (col = 0; col <= 23; ++col) {
-        push_path_cell(path, &count, col, 1);
-    }
-    /* Down the right-hand connector. */
-    for (row = 2; row <= 5; ++row) {
-        push_path_cell(path, &count, 23, row);
-    }
-    /* Second leg, right to left. */
-    for (col = 22; col >= 2; --col) {
-        push_path_cell(path, &count, col, 5);
-    }
-    /* Down the left-hand connector. */
-    for (row = 6; row <= 9; ++row) {
-        push_path_cell(path, &count, 2, row);
-    }
-    /* Bottom leg, left to right, ending at the goal (25,9). */
-    for (col = 3; col <= 25; ++col) {
-        push_path_cell(path, &count, col, 9);
-    }
-
-    if (count != CORE_PATH_CELLS) {
-        /* Only possible if the table above was edited without updating the
-         * constant; fail closed instead of exposing a half-built road. */
-        path->count = 0;
+    count = bfs_route(g, NO_BLOCK, NO_BLOCK, &g->path);
+    if (count < 2) {
+        /* Only possible if the board was changed behind the core's back. Keep
+         * the game renderable instead of pretending there is a road. */
+        g->path.count = 0;
+        g->path.length = 0.0f;
+        g->pathBlocked = true;
         return 0;
     }
-
-    path->count = count;
-    path->length = (float)(count - 1);
+    g->pathBlocked = false;
     return count;
+}
+
+bool core_path_exists(const Game *g, int blockCol, int blockRow)
+{
+    if (!g) {
+        return false;
+    }
+    /* The entrance and the exit can never be built on, so never "blocked". */
+    if (blockCol == CORE_START_COL && blockRow == CORE_START_ROW) {
+        return false;
+    }
+    if (blockCol == CORE_GOAL_COL && blockRow == CORE_GOAL_ROW) {
+        return false;
+    }
+    if (blockCol < 0 || blockCol >= GRID_COLS || blockRow < 0 ||
+        blockRow >= GRID_ROWS) {
+        return bfs_route(g, NO_BLOCK, NO_BLOCK, NULL) >= 2;
+    }
+    return bfs_route(g, blockCol, blockRow, NULL) >= 2;
+}
+
+float core_path_length_with_block(const Game *g, int blockCol, int blockRow)
+{
+    int count;
+
+    if (!g) {
+        return -1.0f;
+    }
+    count = bfs_route(g, blockCol, blockRow, NULL);
+    return (count >= 2) ? (float)(count - 1) : -1.0f;
 }
 
 bool core_path_contains(const Game *g, int col, int row)
@@ -165,10 +276,21 @@ int game_tower_at(const Game *g, int col, int row)
     return (slot > 0) ? slot - 1 : -1;
 }
 
+static bool is_entrance_or_exit(int col, int row)
+{
+    return (col == CORE_START_COL && row == CORE_START_ROW) ||
+           (col == CORE_GOAL_COL && row == CORE_GOAL_ROW);
+}
+
 /*
- * Placement legality only: bounds, road, occupancy, tower cap. It does NOT
- * look at gold, so the UI can distinguish "nothing can go here" (red tile)
- * from "not affordable" (message on tap). game_place_tower() checks gold.
+ * Placement legality only: bounds, entrance/exit, occupancy, tower cap and the
+ * maze rule (a build may never seal the exit). It does NOT look at gold, so the
+ * UI can distinguish "nothing can go here" (red tile) from "not affordable"
+ * (message on tap). game_place_tower() checks gold.
+ *
+ * The reachability test runs a BFS with the candidate cell treated as a wall;
+ * the real board is not touched, so this is safe to call for the cursor every
+ * frame.
  */
 bool game_can_place_at(const Game *g, int col, int row, int type)
 {
@@ -184,10 +306,7 @@ bool game_can_place_at(const Game *g, int col, int row, int type)
     if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) {
         return false;
     }
-    if (g->path.count < 2) {
-        return false;
-    }
-    if (core_path_contains(g, col, row)) {
+    if (is_entrance_or_exit(col, row)) {
         return false;
     }
     if (g->occupancy[row][col] != 0) {
@@ -196,5 +315,5 @@ bool game_can_place_at(const Game *g, int col, int row, int type)
     if (g->towerCount >= MAX_TOWERS) {
         return false;
     }
-    return true;
+    return core_path_exists(g, col, row);
 }
