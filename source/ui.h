@@ -75,7 +75,7 @@ bool ui_rect_contains(UiRect r, float x, float y);
 
 /* ---- explicit hit boxes, shared with the preview harness ---- */
 UiRect ui_start_rect(void);             /* PHASE_MENU: START               */
-UiRect ui_tower_button_rect(int type);  /* 0..2                            */
+UiRect ui_tower_button_rect(int type);  /* 0..5 (DamageType)               */
 UiRect ui_upgrade_rect(void);           /* selected / cursor tower panel   */
 UiRect ui_sell_rect(void);
 UiRect ui_next_wave_rect(void);         /* PHASE_BUILD                     */

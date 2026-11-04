@@ -31,13 +31,15 @@ jobs:
         with:
           name: Elemental Defense ${{ github.ref_name }}
           body: |
-            Elemental Defense for the Nintendo 3DS - a maze-building tower defense.
+            Elemental Defense for the Nintendo 3DS - a maze-building tower defense with a
+            Borderlands-style damage model.
 
-            Build towers ON the road to force the creeps into longer detours; the route is a BFS
-            shortest path and is recalculated every time you build or sell a tower.
-
-            - 25 waves, fire / water / forest towers with the elemental damage multipliers
-            - 10 upgrade levels per tower, 20 lives, elite waves every 5th wave
+            - build towers ON the road: the creeps recalculate their route (BFS shortest path)
+              after every build and sell
+            - enemies are 1-3 concentric HP / SHIELD / ARMOR rings, destroyed outside-in
+            - six towers: GUN, FIRE (stacking burn), SHOCK (stun), CORROSIVE (acid puddle),
+              SLAG (+50% damage taken), EXPLOSIVE (AoE, 3x slower)
+            - 25 waves, 10 upgrade levels, 20 lives, elite waves every 5th wave
             - touch controls on the bottom screen, d-pad + buttons fallback
             - runs at 60 fps in Azahar
 
