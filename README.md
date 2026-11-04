@@ -1,10 +1,10 @@
 # Attempt 2: Elemental Defense for the 3DS
 
-A tower defense game I originally wrote in LÃ–VE2D, rebuilt from scratch in C so it actually runs
+A tower defense game I originally wrote in LÖVE2D, rebuilt from scratch in C so it actually runs
 properly on a Nintendo 3DS.
 
-The first attempt ran the LÃ–VE version through LovePotion. It booted! And then crawled at a few
-frames per second with half the playfield off-screen and touch controls fighting LÃ–VE's mouse
+The first attempt ran the LÖVE version through LovePotion. It booted! And then crawled at a few
+frames per second with half the playfield off-screen and touch controls fighting LÖVE's mouse
 emulation. Rather than keep patching a compatibility layer that was never going to behave, this repo
 is the native rewrite: same game, same numbers, drawn with `citro2d`.
 
@@ -17,7 +17,7 @@ The old attempt for posterity: [tower-defense-3ds-psvita-project-attempt](https:
 A grid tower defense on a 26x13 board. Creeps crawl along a fixed serpentine road from the left edge
 to the right, you build towers next to the road to stop them, and every kill pays for the next tower.
 
-Three elemental towers â€” **Fire**, **Water**, **Forest** â€” with a rock-paper-scissors damage table:
+Three elemental towers — **Fire**, **Water**, **Forest** — with a rock-paper-scissors damage table:
 
 | | vs Fire | vs Water | vs Forest |
 |---|---|---|---|
@@ -58,17 +58,17 @@ point that can run `.3dsx` files).
 | Select | change game speed (1x / 2x / 4x) |
 
 Tapping a placed tower with your finger on the bottom screen isn't a thing yet (the battlefield is on
-the top screen, which isn't touch) â€” the D-pad cursor is how you select one, or the panel shows the
+the top screen, which isn't touch) — the D-pad cursor is how you select one, or the panel shows the
 tower you placed most recently.
 
 ## Status
 
 Playable end to end: 25 waves, all three towers, upgrades, lives, game over, victory. It boots at a
-stable 60 fps in the Azahar emulator, which is where all my testing so far happened â€” real-hardware
+stable 60 fps in the Azahar emulator, which is where all my testing so far happened — real-hardware
 input and GPU output are the next thing I'll verify on the actual console. What's still missing:
 
 - [ ] sound effects and music (the audio layer is stubbed, the original `.wav`s are still around)
-- [ ] real-hardware playtest tuning â€” balance is currently the old LÃ–VE numbers on a hand-built road
+- [ ] real-hardware playtest tuning — balance is currently the old LÖVE numbers on a hand-built road
 - [ ] general polish: another pass on the menus, and the bottom panel starts to feel cramped at 320px
 
 ## Building it
@@ -83,13 +83,14 @@ make
 ```
 
 That produces `ElementalDefense.3dsx`, `ElementalDefense.elf` and the `.smdh` metadata. Copy the
-`.3dsx` to your SD card and you're away. There's a GitHub Actions workflow in `.github/workflows/`
-that builds the same artifact on every push â€” it's set up, though GitHub was slow to assign runners
-to a brand-new repo, so the `.3dsx` attached to the release was built locally.
+`.3dsx` to your SD card and you're away. Every push, and every `v*` tag, also builds it in GitHub
+Actions — the release attached here was produced by that workflow. (The Actions tab likes to claim
+the runs are "queued" forever on this repo; they're not, that's just GitHub being weird about new
+repos — check the artifacts.)
 
 ## How it's put together
 
-The point of the rewrite was to not repeat the LÃ–VE mistake of tangling rendering, input and game rules
+The point of the rewrite was to not repeat the LÖVE mistake of tangling rendering, input and game rules
 into one file. So:
 
 ```
@@ -97,7 +98,7 @@ source/core/     portable C99 game simulation - no 3DS headers, runs on a PC
 source/plat_3ds.c citro2d backend for the two screens
 source/render.c  top screen: board, towers, enemies, effects
 source/ui.c      bottom screen: build panel, upgrade/sell, wave control
-source/app.c     the scene state machine and input â†’ action mapping
+source/app.c     the scene state machine and input → action mapping
 source/main.c    aptMainLoop / hid polling / frame timing
 tests/           the core's unit tests (32 of them), built and run on the host
 tools/sim.c      headless auto-play balance sim
@@ -117,19 +118,19 @@ make -C tests CC=cc test     # any C compiler
 
 ## Why rewrite instead of fixing the Lua one
 
-The LÃ–VE version has all the actual game design in it â€” tower stats, wave composition, upgrade costs â€”
+The LÖVE version has all the actual game design in it — tower stats, wave composition, upgrade costs —
 and I kept that (there's a full port spec in [`docs/design.md`](docs/design.md) with the original
-numbers extracted line by line). What I didn't keep is the rendering and input layer. LÃ–VE on the 3DS
+numbers extracted line by line). What I didn't keep is the rendering and input layer. LÖVE on the 3DS
 was never going to push a 1280x720 canvas of shapes at a decent framerate, and the touch/keyboard
 mismatch meant the game was unplayable on the console it was made for. Writing the game once in C
 against libctru is less work than fighting a compatibility layer forever.
 
 The original Lua game also had a few... creative ideas: there was no lose condition, enemies reaching
 the end actually *paid you* gold, and waves auto-chained with no build phase. Those are fixed here
-(see `docs/design.md` Â§14 for the full list of deliberate changes).
+(see `docs/design.md` §14 for the full list of deliberate changes).
 
 ## Credits
 
-- [devkitPro](https://devkitpro.org/), libctru, citro3d and citro2d â€” without these, no 3DS homebrew.
+- [devkitPro](https://devkitpro.org/), libctru, citro3d and citro2d — without these, no 3DS homebrew.
 - [font8x8](https://github.com/dhepper/font8x8) by Daniel Hepper (public domain) for the bitmap font.
-- The original Elemental Defense was my own LÃ–VE2D project.
+- The original Elemental Defense was my own LÖVE2D project.
