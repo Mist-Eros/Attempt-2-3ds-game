@@ -3,7 +3,7 @@
  *
  * This header is the contract between the platform-independent simulation
  * (source/core/, built and unit-tested on a PC) and the 3DS front end
- * (source/*.c, built with devkitARM + citro2d).
+ * (source / main.c, plat_3ds.c, built with devkitARM + citro2d).
  *
  * Rules for the core:
  *   - never include <3ds.h> or any citro2d/citro3d header here
@@ -150,6 +150,14 @@ typedef struct {
      * that to compare two runs side by side.
      */
     float stepAccumulator;
+
+    /*
+     * Remaining regular-enemy element quota for the wave being spawned
+     * (indexed by Element: fire, water, forest). Waves spawn exact quotas
+     * instead of the original game's pure random rolls, so the bottom-screen
+     * preview is truthful; the spawn ORDER is still shuffled by the RNG.
+     */
+    uint8_t spawnQuota[TOWER_TYPE_COUNT];
 } Game;
 
 /* ---- content tables (implemented in the core) ---- */
