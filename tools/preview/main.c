@@ -11,7 +11,9 @@
  *   preview.exe [--scenario NAME] [--frames N] [--capture-every K]
  *               [--out DIR] [--seed S]
  *
- * Scenarios: menu, build, maze, wave, selected, gameover, victory, all (default all)
+ * Scenarios: menu, build, maze, wave, status, selected, gameover, victory,
+ * all (default all).  v0.3 adds six damage-type towers, layered enemies and
+ * status effects; see docs/elements-spec.md.
  *
  * The driver never pokes at rendering code; it only talks to app.h plus the
  * read-only ui_*_rect() hit boxes that ui.h exposes for exactly this purpose.
@@ -238,13 +240,13 @@ static void move_cursor_to(Driver *d, int col, int row)
     move_cursor(d, col - g->cursorCol, row - g->cursorRow);
 }
 
-/* Cycle the build type with R until it is `type` (0=fire, 1=water, 2=forest). */
+/* Cycle the build type with R until it is `type` (0..TOWER_TYPE_COUNT-1). */
 static void select_type(Driver *d, int type)
 {
     Game *g = &d->app.game;
     int guard = 0;
 
-    while (g->selectedType != type && guard < 4) {
+    while (g->selectedType != type && guard < TOWER_TYPE_COUNT + 1) {
         PRESS(d, r, false);
         ++guard;
     }
@@ -261,23 +263,86 @@ static bool try_place_tower(Driver *d, int col, int row, int type)
     select_type(d, type);
 
     if (!game_can_place_at(g, col, row, type)) {
-        printf("[maze] skip (%2d,%2d): can_place_at=false (gold=%d path.length=%.0f)\n",
-               col, row, g->gold, (double)g->path.length);
+        printf("[place] skip (%2d,%2d) type=%d: can_place_at=false (gold=%d path.length=%.0f)\n",
+               col, row, type, g->gold, (double)g->path.length);
         return false;
     }
 
     PRESS(d, a, false);
 
     if (game_tower_at(g, col, row) < 0) {
-        printf("[maze] rejected (%2d,%2d): %s (gold=%d)\n",
-               col, row, g->message[0] ? g->message : "placement failed", g->gold);
+        printf("[place] rejected (%2d,%2d) type=%d: %s (gold=%d)\n",
+               col, row, type, g->message[0] ? g->message : "placement failed", g->gold);
         return false;
     }
 
-    printf("[maze] placed %-6s at (%2d,%2d) towers=%d gold=%3d path.length=%.0f\n",
+    printf("[place] placed %-9s at (%2d,%2d) towers=%d gold=%3d path.length=%.0f\n",
            spec ? spec->name : "?", col, row, g->towerCount, g->gold,
            (double)g->path.length);
     return true;
+}
+
+/* v0.3 helper: summarise live enemies by layer count and outermost layer type. */
+static void enemy_layer_stats(const Game *g, int byLayers[3], int byOuter[3])
+{
+    int i;
+
+    byLayers[0] = byLayers[1] = byLayers[2] = 0;
+    byOuter[0] = byOuter[1] = byOuter[2] = 0;
+    for (i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &g->enemies[i];
+
+        if (!e->active)
+            continue;
+        if (e->layerCount >= 1 && e->layerCount <= 3)
+            byLayers[e->layerCount - 1]++;
+        if (e->layers[0].type < 3)
+            byOuter[e->layers[0].type]++;
+    }
+}
+
+/* Any live enemy currently affected by a status?  Used to capture effect
+ * visuals from the real simulation instead of poking at pixels. */
+static int max_burn_stacks(const Game *g)
+{
+    int i;
+    int best = 0;
+    for (i = 0; i < MAX_ENEMIES; i++)
+        if (g->enemies[i].active && (int)g->enemies[i].burnStacks > best)
+            best = (int)g->enemies[i].burnStacks;
+    return best;
+}
+static bool any_stun(const Game *g)
+{
+    int i;
+    for (i = 0; i < MAX_ENEMIES; i++)
+        if (g->enemies[i].active && g->enemies[i].stunTimer > 0.0f)
+            return true;
+    return false;
+}
+static bool any_slag(const Game *g)
+{
+    int i;
+    for (i = 0; i < MAX_ENEMIES; i++)
+        if (g->enemies[i].active && g->enemies[i].slagTimer > 0.0f)
+            return true;
+    return false;
+}
+static bool any_puddle(const Game *g)
+{
+    int i;
+    for (i = 0; i < MAX_PUDDLES; i++)
+        if (g->puddles[i].active)
+            return true;
+    return false;
+}
+static bool any_explosion_beam(const Game *g)
+{
+    int i;
+    for (i = 0; i < MAX_BEAMS; i++)
+        if (g->beams[i].active && g->beams[i].kind == 1)
+            return true;
+    return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,36 +359,37 @@ static void scenario_menu(Driver *d)
     run_frame(d, NULL, true);   /* frame 120: +2 s */
 }
 
-/* Menu -> build phase, place six towers of all three types, show pause. */
+/* Menu -> build phase; place one tower of every damage type so the six-button
+ * palette, the selected-tower panel and the layer-based INCOMING preview can
+ * be checked, then show the pause overlay. */
 static void scenario_build(Driver *d)
 {
+    static const struct { int col, row, type; } plan[] = {
+        {  3, 2, DMG_NORMAL    },
+        {  6, 2, DMG_FIRE      },
+        {  9, 2, DMG_ELECTRIC  },
+        { 12, 2, DMG_CORROSIVE },
+        { 15, 2, DMG_SLAG      },
+        { 18, 2, DMG_EXPLOSIVE }
+    };
+    const int planCount = (int)(sizeof plan / sizeof plan[0]);
+    int i;
+
     start_run_from_menu(d);
-    run_frame(d, NULL, true);           /* empty build board + palette */
+    run_frame(d, NULL, true);           /* empty build board: 6-type palette + layer preview */
 
-    move_cursor(d, 4, 0);               /* (4,0) */
-    PRESS(d, a, false);                 /* FIRE   at (4,0) */
-    PRESS(d, r, false);                 /* -> WATER */
-    move_cursor(d, 0, 2);               /* (4,2) */
-    PRESS(d, a, false);                 /* WATER  at (4,2) */
-    PRESS(d, r, false);                 /* -> FOREST */
-    move_cursor(d, 7, 0);               /* (11,2) */
-    PRESS(d, a, false);                 /* FOREST at (11,2) */
+    for (i = 0; i < planCount; i++) {
+        if (!try_place_tower(d, plan[i].col, plan[i].row, plan[i].type))
+            continue;
+        if (i == 2) {
+            idle(d, 2);
+            run_frame(d, NULL, true);   /* 3 towers: palette + selected panel */
+        }
+    }
     idle(d, 2);
-    run_frame(d, NULL, true);           /* 3 towers, last one selected */
+    run_frame(d, NULL, true);           /* six towers, BLASTER selected (AOE line) */
 
-    PRESS(d, r, false);                 /* -> FIRE */
-    move_cursor(d, 8, 0);               /* (19,2) */
-    PRESS(d, a, false);                 /* FIRE   at (19,2) */
-    PRESS(d, l, false);                 /* -> FOREST */
-    move_cursor(d, 0, 4);               /* (19,6) */
-    PRESS(d, a, false);                 /* FOREST at (19,6) */
-    PRESS(d, r, false);                 /* -> FIRE */
-    move_cursor(d, 0, 4);               /* (19,10) */
-    PRESS(d, a, false);                 /* FIRE   at (19,10) */
-    idle(d, 2);
-    run_frame(d, NULL, true);           /* 6 towers, selected + range circle */
-
-    move_cursor(d, -7, -10);            /* (12,0), clears the selection */
+    move_cursor_to(d, 12, 0);           /* (12,0), clears the selection */
     idle(d, 4);
     run_frame(d, NULL, true);           /* plain build HUD, cursor only */
 
@@ -334,22 +400,22 @@ static void scenario_build(Driver *d)
     idle(d, 2);
 }
 
-/* BFS maze scenario: towers may now be built on the road and every build
- * re-runs the pathfinder, so a short wall of towers makes the creeps walk a
- * long detour.  The wall grows up from the road at column 6 - 7 towers spend
- * all starting gold and turn the straight 25-cell road into a 39-cell
- * serpentine.  Captures: straight road, first detour, mid-wall, road-cell UI
- * hint, full maze, then wave 1 creeps walking the rerouted road. */
+/* BFS maze scenario: towers may be built on the road and every build re-runs
+ * the pathfinder, so a short wall of towers makes the creeps walk a long
+ * detour.  The wall grows up from the road at column 6 and contains all six
+ * damage types (7 towers = 145 of 150 gold), turning the straight 25-cell road
+ * into a 39-cell serpentine.  Captures: straight road, first detour, mid-wall,
+ * road-cell UI hint, full maze, then wave 1 creeps on the rerouted road. */
 static void scenario_maze(Driver *d)
 {
     static const struct { int col, row, type; } plan[] = {
-        { 6, 12, ELEMENT_FIRE   },   /* on the road -> first detour   */
-        { 6, 11, ELEMENT_WATER  },
-        { 6, 10, ELEMENT_FOREST },
-        { 6,  9, ELEMENT_FIRE   },
-        { 6,  8, ELEMENT_WATER  },
-        { 6,  7, ELEMENT_FOREST },
-        { 6,  6, ELEMENT_FIRE   }    /* full wall -> longest detour   */
+        { 6, 12, DMG_NORMAL    },   /* on the road -> first detour    */
+        { 6, 11, DMG_FIRE      },
+        { 6, 10, DMG_ELECTRIC  },
+        { 6,  9, DMG_CORROSIVE },   /* wall shows all six damage types */
+        { 6,  8, DMG_SLAG      },
+        { 6,  7, DMG_EXPLOSIVE },
+        { 6,  6, DMG_NORMAL    }    /* full wall -> longest detour    */
     };
     const int planCount = (int)(sizeof plan / sizeof plan[0]);
     int i;
@@ -404,80 +470,201 @@ static void scenario_maze(Driver *d)
     }
 }
 
-/* Build a few towers, send wave 1, capture activity (enemies + beams).
- * Towers go on board row 11, directly above the straight road on row 12, and
- * are packed 2 cells apart so their 32 px range circles cover a continuous
- * stretch of road - otherwise creeps walk between towers untouched. */
+/* Mixed six-type battery above the road.  The wave counter is forced to 9 so
+ * enemies spawn with 3 concentric HP/SHIELD/ARMOR layers (waves 1-3 = 1 layer,
+ * 4-8 = 2, 9+ = 3); captures pick up the layered rings and combat effects. */
 static void scenario_wave(Driver *d)
 {
+    static const struct { int col, row, type; } plan[] = {
+        {  2, 11, DMG_NORMAL    },
+        {  4, 11, DMG_FIRE      },
+        {  6, 11, DMG_ELECTRIC  },
+        {  8, 11, DMG_CORROSIVE },
+        { 10, 11, DMG_SLAG      },
+        { 12, 11, DMG_EXPLOSIVE }
+    };
+    const int planCount = (int)(sizeof plan / sizeof plan[0]);
     int i;
-    int b;
+    int byLayers[3];
+    int byOuter[3];
+    bool gotLayered = false;
+    int combatCaptures = 0;
 
     start_run_from_menu(d);
-
-    move_cursor(d, 4, 11);              /* (4,11) */
-    PRESS(d, a, false);                 /* FIRE */
-    PRESS(d, r, false);
-    move_cursor(d, 2, 0);               /* (6,11) */
-    PRESS(d, a, false);                 /* WATER */
-    PRESS(d, r, false);
-    move_cursor(d, 2, 0);               /* (8,11) */
-    PRESS(d, a, false);                 /* FOREST */
-    PRESS(d, r, false);
-    move_cursor(d, 2, 0);               /* (10,11) */
-    PRESS(d, a, false);                 /* FIRE */
+    for (i = 0; i < planCount; i++)
+        (void)try_place_tower(d, plan[i].col, plan[i].row, plan[i].type);
     idle(d, 2);
-    run_frame(d, NULL, true);           /* build phase, 4 towers ready */
+    run_frame(d, NULL, true);           /* build phase, six-type battery ready */
 
-    /* Start wave 1 through the real bottom-screen NEXT button hit box. */
+    /* Cheat the wave counter forward: layers are 1 for waves 1-3, 2 for 4-8 and
+     * 3 for waves 9+.  Wave 9 has no elites, so the spawn sequence is stable. */
+    d->app.game.wave = 9;
+    printf("[wave] forcing wave=%d -> 3-layer enemies (HP/SHIELD/ARMOR rings)\n",
+           d->app.game.wave);
+
     if (!tap_rect(d, ui_next_wave_rect(), true)) {
         fprintf(stderr, "[wave] ui_next_wave_rect() is empty; cannot start wave\n");
         return;
     }
 
-    /* Run the wave.  Capture while beams are on screen so the screenshots
-     * actually show combat, plus a slow heartbeat of enemy-only frames.  Stop
-     * as soon as the wave resolves (phase drops back to PHASE_BUILD) so the
-     * capture set stays small and every file is a distinct game state. */
     for (i = 0; i < 1500 && d->frame < d->max_frames; i++) {
         bool capture = false;
+        bool beam = false;
+        int b;
 
         if (d->app.game.phase != PHASE_WAVE)
             break;
+
+        enemy_layer_stats(&d->app.game, byLayers, byOuter);
         for (b = 0; b < MAX_BEAMS; b++) {
             if (d->app.game.beams[b].active) {
-                if ((d->frame % 20) == 0)
-                    capture = true;
+                beam = true;
                 break;
             }
         }
-        if (!capture && d->app.game.enemiesAlive > 0 && (d->frame % 90) == 0)
+
+        if (!gotLayered && byLayers[2] > 0) {
+            gotLayered = true;
             capture = true;
+            printf("[wave] capture 3-layer enemies: %d alive with 2 layers, %d with 3;"
+                   " outer layers HP=%d SHIELD=%d ARMOR=%d\n",
+                   byLayers[1], byLayers[2], byOuter[0], byOuter[1], byOuter[2]);
+        } else if (beam && combatCaptures < 10 && (d->frame % 30) == 0) {
+            capture = true;
+            ++combatCaptures;
+        } else if (!beam && d->app.game.enemiesAlive > 0 && (d->frame % 120) == 0) {
+            capture = true;
+        }
         run_frame(d, NULL, capture);
     }
     idle(d, 2);
-    run_frame(d, NULL, true);           /* post-wave state */
+    run_frame(d, NULL, true);           /* last combat state of the run */
 }
 
-/* Place a tower, show the selected/upgrade panel, upgrade it, then sell it.
- * The tower sits on row 11, directly above the road on row 12 (but not on it),
- * so the top screen shows the tower, its range circle and the road together. */
+/* Status-effect showcase: five damage-type towers next to the road and a
+ * forced wave-9 spawn.  Each effect screenshot is taken exactly when the real
+ * simulation reports it (burn stacks, stun timer, acid puddle, slag timer,
+ * explosion beam) - no rendered pixels are faked. */
+static void scenario_status(Driver *d)
+{
+    static const struct { int col, row, type; } plan[] = {
+        {  2, 11, DMG_FIRE      },
+        {  4, 11, DMG_ELECTRIC  },
+        {  6, 11, DMG_CORROSIVE },
+        {  8, 11, DMG_SLAG      },
+        { 10, 11, DMG_EXPLOSIVE }
+    };
+    const int planCount = (int)(sizeof plan / sizeof plan[0]);
+    bool gotLayers = false;
+    bool gotBurn = false;
+    bool gotStun = false;
+    bool gotPuddle = false;
+    bool gotSlag = false;
+    bool gotExplosion = false;
+    int i;
+
+    start_run_from_menu(d);
+    for (i = 0; i < planCount; i++)
+        (void)try_place_tower(d, plan[i].col, plan[i].row, plan[i].type);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* five status towers above the road */
+
+    d->app.game.wave = 9;               /* 3-layer enemies */
+    if (!tap_rect(d, ui_next_wave_rect(), true)) {
+        fprintf(stderr, "[status] ui_next_wave_rect() is empty; cannot start wave\n");
+        return;
+    }
+
+    for (i = 0; i < 1600 && d->frame < d->max_frames; i++) {
+        const char *why = NULL;
+        bool capture = false;
+        int byLayers[3];
+        int byOuter[3];
+
+        if (d->app.game.phase != PHASE_WAVE)
+            break;
+
+        enemy_layer_stats(&d->app.game, byLayers, byOuter);
+
+        if (!gotLayers && byLayers[2] > 0) {
+            gotLayers = true;
+            capture = true;
+            printf("[status] capture: 3-layer enemy; outer layers HP=%d SHIELD=%d ARMOR=%d\n",
+                   byOuter[0], byOuter[1], byOuter[2]);
+        } else if (!gotPuddle && any_puddle(&d->app.game)) {
+            gotPuddle = true;
+            capture = true;
+            why = "corrosive acid puddle";
+        } else if (!gotExplosion && any_explosion_beam(&d->app.game)) {
+            gotExplosion = true;
+            capture = true;
+            why = "explosive AoE ring";
+        } else if (!gotBurn && max_burn_stacks(&d->app.game) >= 2) {
+            gotBurn = true;
+            capture = true;
+            why = "fire burn stacks (>=2 motes)";
+        } else if (!gotStun && any_stun(&d->app.game)) {
+            gotStun = true;
+            capture = true;
+            why = "electric stun flash";
+        } else if (!gotSlag && any_slag(&d->app.game)) {
+            gotSlag = true;
+            capture = true;
+            why = "slag purple outline";
+        }
+
+        if (why)
+            printf("[status] capture: %s\n", why);
+        run_frame(d, NULL, capture);
+
+        if (gotLayers && gotBurn && gotStun && gotPuddle && gotSlag && gotExplosion)
+            break;
+    }
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* final status state */
+
+    printf("[status] effects seen: layers=%d burn=%d stun=%d puddle=%d slag=%d explosion=%d\n",
+           (int)gotLayers, (int)gotBurn, (int)gotStun, (int)gotPuddle,
+           (int)gotSlag, (int)gotExplosion);
+}
+
+/* Selected-tower panel for several damage types: the info line must show the
+ * per-type effect (`BURNS`, `STUNS`, `ACID PUDDLE`, `SLAG: +50% DMG TAKEN`,
+ * `AOE 1.3`) in the damage-type colour.  Also exercises the upgrade path. */
 static void scenario_selected(Driver *d)
 {
     start_run_from_menu(d);
 
-    move_cursor(d, 4, 11);              /* (4,11) */
-    PRESS(d, a, false);                 /* place FIRE (auto-selected) */
+    /* FIRE: burn effect line + range circle over the road. */
+    (void)try_place_tower(d, 4, 11, DMG_FIRE);
     idle(d, 2);
-    run_frame(d, NULL, true);           /* selected panel + range circle */
+    run_frame(d, NULL, true);           /* FIRE selected: "BURNS" line */
 
     tap_rect(d, ui_upgrade_rect(), false);
     idle(d, 2);
-    run_frame(d, NULL, true);           /* after upgrade: LV.2 panel */
+    run_frame(d, NULL, true);           /* FIRE LV.2, next upgrade cost */
+
+    /* One tower of each remaining effect type; placement auto-selects it, so
+     * each panel is captured straight away. */
+    (void)try_place_tower(d, 6, 11, DMG_CORROSIVE);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* CORROSIVE: "ACID PUDDLE" line */
+
+    (void)try_place_tower(d, 8, 11, DMG_SLAG);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* SLAG: "+50% DMG TAKEN" line */
+
+    (void)try_place_tower(d, 10, 11, DMG_EXPLOSIVE);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* BLASTER: "AOE 1.3" line */
+
+    (void)try_place_tower(d, 12, 11, DMG_ELECTRIC);
+    idle(d, 2);
+    run_frame(d, NULL, true);           /* SHOCK: "STUNS" line */
 
     tap_rect(d, ui_sell_rect(), false);
     idle(d, 2);
-    run_frame(d, NULL, true);           /* after sell: empty cell panel */
+    run_frame(d, NULL, true);           /* after sell: empty-cell panel */
 }
 
 /* Force the game-over overlay (no way to lose 20 lives in a 30 s script). */
@@ -485,11 +672,9 @@ static void scenario_gameover(Driver *d)
 {
     start_run_from_menu(d);
 
-    move_cursor(d, 4, 0);
-    PRESS(d, a, false);                 /* FIRE at (4,0) */
-    PRESS(d, r, false);
-    move_cursor(d, 5, 0);               /* (9,0) */
-    PRESS(d, a, false);                 /* WATER at (9,0) */
+    (void)try_place_tower(d, 4, 0, DMG_FIRE);
+    (void)try_place_tower(d, 9, 0, DMG_ELECTRIC);
+    (void)try_place_tower(d, 14, 0, DMG_CORROSIVE);
     idle(d, 3);
 
     d->app.game.phase = PHASE_GAMEOVER;
@@ -506,11 +691,9 @@ static void scenario_victory(Driver *d)
 {
     start_run_from_menu(d);
 
-    move_cursor(d, 4, 0);
-    PRESS(d, a, false);                 /* FIRE at (4,0) */
-    PRESS(d, r, false);
-    move_cursor(d, 5, 0);               /* (9,0) */
-    PRESS(d, a, false);                 /* WATER at (9,0) */
+    (void)try_place_tower(d, 4, 0, DMG_FIRE);
+    (void)try_place_tower(d, 9, 0, DMG_SLAG);
+    (void)try_place_tower(d, 14, 0, DMG_EXPLOSIVE);
     idle(d, 3);
 
     d->app.game.phase = PHASE_VICTORY;
@@ -538,6 +721,7 @@ static const ScenarioEntry kScenarios[] = {
     { "build",    scenario_build    },
     { "maze",     scenario_maze     },
     { "wave",     scenario_wave     },
+    { "status",   scenario_status   },
     { "selected", scenario_selected },
     { "gameover", scenario_gameover },
     { "victory",  scenario_victory  }
@@ -617,8 +801,8 @@ static void usage(const char *argv0)
            "\n"
            "Usage: %s [options]\n"
            "\n"
-           "  --scenario NAME   menu | build | maze | wave | selected | gameover |\n"
-           "                    victory | all            (default: all)\n"
+           "  --scenario NAME   menu | build | maze | wave | status | selected |\n"
+           "                    gameover | victory | all  (default: all)\n"
            "  --frames N        frame cap per scenario        (default: %d)\n"
            "  --capture-every K also capture every K-th frame (default: 0 = off)\n"
            "  --out DIR         screenshot directory          (default: out)\n"
