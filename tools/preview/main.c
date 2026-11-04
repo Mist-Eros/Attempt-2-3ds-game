@@ -11,7 +11,7 @@
  *   preview.exe [--scenario NAME] [--frames N] [--capture-every K]
  *               [--out DIR] [--seed S]
  *
- * Scenarios: menu, build, wave, selected, gameover, victory, all (default all)
+ * Scenarios: menu, build, maze, wave, selected, gameover, victory, all (default all)
  *
  * The driver never pokes at rendering code; it only talks to app.h plus the
  * read-only ui_*_rect() hit boxes that ui.h exposes for exactly this purpose.
@@ -61,6 +61,8 @@ typedef struct {
     int captures;
     int failures;
     int duplicates;     /* captures identical to the previous one       */
+    int path_initial;   /* maze scenario: path.length before building   */
+    int path_final;     /* maze scenario: path.length after building    */
     uint32_t last_top_sig;
     uint32_t last_bottom_sig;
 } Driver;
@@ -228,6 +230,56 @@ static void start_run_from_menu(Driver *d)
     idle(d, 2);
 }
 
+/* Move the D-pad cursor to an absolute board cell (one edge press per cell).
+ * Uses Game.cursorCol/cursorRow so it works whatever cell a run starts on. */
+static void move_cursor_to(Driver *d, int col, int row)
+{
+    Game *g = &d->app.game;
+    move_cursor(d, col - g->cursorCol, row - g->cursorRow);
+}
+
+/* Cycle the build type with R until it is `type` (0=fire, 1=water, 2=forest). */
+static void select_type(Driver *d, int type)
+{
+    Game *g = &d->app.game;
+    int guard = 0;
+
+    while (g->selectedType != type && guard < 4) {
+        PRESS(d, r, false);
+        ++guard;
+    }
+}
+
+/* Try one scripted placement.  Never loops: reports and returns false when the
+ * core rejects the cell (e.g. it would seal the exit, or we are out of gold). */
+static bool try_place_tower(Driver *d, int col, int row, int type)
+{
+    Game *g = &d->app.game;
+    const TowerSpec *spec = game_tower_spec(type);
+
+    move_cursor_to(d, col, row);
+    select_type(d, type);
+
+    if (!game_can_place_at(g, col, row, type)) {
+        printf("[maze] skip (%2d,%2d): can_place_at=false (gold=%d path.length=%.0f)\n",
+               col, row, g->gold, (double)g->path.length);
+        return false;
+    }
+
+    PRESS(d, a, false);
+
+    if (game_tower_at(g, col, row) < 0) {
+        printf("[maze] rejected (%2d,%2d): %s (gold=%d)\n",
+               col, row, g->message[0] ? g->message : "placement failed", g->gold);
+        return false;
+    }
+
+    printf("[maze] placed %-6s at (%2d,%2d) towers=%d gold=%3d path.length=%.0f\n",
+           spec ? spec->name : "?", col, row, g->towerCount, g->gold,
+           (double)g->path.length);
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* scenarios                                                           */
 /* ------------------------------------------------------------------ */
@@ -282,10 +334,80 @@ static void scenario_build(Driver *d)
     idle(d, 2);
 }
 
+/* BFS maze scenario: towers may now be built on the road and every build
+ * re-runs the pathfinder, so a short wall of towers makes the creeps walk a
+ * long detour.  The wall grows up from the road at column 6 - 7 towers spend
+ * all starting gold and turn the straight 25-cell road into a 39-cell
+ * serpentine.  Captures: straight road, first detour, mid-wall, road-cell UI
+ * hint, full maze, then wave 1 creeps walking the rerouted road. */
+static void scenario_maze(Driver *d)
+{
+    static const struct { int col, row, type; } plan[] = {
+        { 6, 12, ELEMENT_FIRE   },   /* on the road -> first detour   */
+        { 6, 11, ELEMENT_WATER  },
+        { 6, 10, ELEMENT_FOREST },
+        { 6,  9, ELEMENT_FIRE   },
+        { 6,  8, ELEMENT_WATER  },
+        { 6,  7, ELEMENT_FOREST },
+        { 6,  6, ELEMENT_FIRE   }    /* full wall -> longest detour   */
+    };
+    const int planCount = (int)(sizeof plan / sizeof plan[0]);
+    int i;
+
+    start_run_from_menu(d);
+    idle(d, 2);
+
+    d->path_initial = (int)(d->app.game.path.length + 0.5f);
+    printf("[maze] initial path.length=%.0f (entrance (%d,%d) -> exit (%d,%d)), towers=%d\n",
+           (double)d->app.game.path.length, 0, GRID_ROWS - 1, GRID_COLS - 1, GRID_ROWS - 1,
+           d->app.game.towerCount);
+    run_frame(d, NULL, true);           /* (1) straight road, no towers */
+
+    for (i = 0; i < planCount; i++) {
+        bool capture = (i == 0 || i == 3 || i == planCount - 1);
+        if (try_place_tower(d, plan[i].col, plan[i].row, plan[i].type) && capture) {
+            idle(d, 2);
+            run_frame(d, NULL, true);   /* (2) first detour / (3) mid-wall / (5) full maze */
+        }
+        if (i == 3) {
+            /* Cursor on an empty road cell while we can still afford a tower:
+             * the bottom info panel should show the new reroute hint copy. */
+            move_cursor_to(d, 15, 12);
+            idle(d, 2);
+            run_frame(d, NULL, true);   /* (4) road-cell reroute hint */
+        }
+    }
+
+    d->path_final = (int)(d->app.game.path.length + 0.5f);
+    printf("[maze] RESULT path.length %d -> %d  towers=%d  gold=%d\n",
+           d->path_initial, d->path_final, d->app.game.towerCount, d->app.game.gold);
+
+    /* Drive wave 1 so creeps are actually walking the rerouted road. */
+    if (d->app.game.phase == PHASE_BUILD &&
+        tap_rect(d, ui_next_wave_rect(), true)) {   /* (6) wave start */
+        int wave_captures = 0;
+        for (i = 0; i < 900 && d->frame < d->max_frames; i++) {
+            bool capture = false;
+
+            if (d->app.game.phase != PHASE_WAVE)
+                break;
+            /* Three evenly spaced shots of the creeps on the long detour. */
+            if (d->app.game.enemiesAlive > 0 && wave_captures < 3 &&
+                (d->frame % 150) == 0) {
+                capture = true;
+                ++wave_captures;
+            }
+            run_frame(d, NULL, capture);
+        }
+        idle(d, 2);
+        run_frame(d, NULL, true);       /* (7) creeps on the rerouted road */
+    }
+}
+
 /* Build a few towers, send wave 1, capture activity (enemies + beams).
- * Towers go on board row 2 (just below the top path leg, still in range) so
- * they are visible during PHASE_BUILD - row 0 is covered by the build-phase
- * hint strip in render.c (reported to engine-3ds). */
+ * Towers go on board row 11, directly above the straight road on row 12, and
+ * are packed 2 cells apart so their 32 px range circles cover a continuous
+ * stretch of road - otherwise creeps walk between towers untouched. */
 static void scenario_wave(Driver *d)
 {
     int i;
@@ -293,16 +415,16 @@ static void scenario_wave(Driver *d)
 
     start_run_from_menu(d);
 
-    move_cursor(d, 3, 2);               /* (3,2) */
+    move_cursor(d, 4, 11);              /* (4,11) */
     PRESS(d, a, false);                 /* FIRE */
     PRESS(d, r, false);
-    move_cursor(d, 5, 0);               /* (8,2) */
+    move_cursor(d, 2, 0);               /* (6,11) */
     PRESS(d, a, false);                 /* WATER */
     PRESS(d, r, false);
-    move_cursor(d, 7, 0);               /* (15,2) */
+    move_cursor(d, 2, 0);               /* (8,11) */
     PRESS(d, a, false);                 /* FOREST */
     PRESS(d, r, false);
-    move_cursor(d, 7, 0);               /* (22,2) */
+    move_cursor(d, 2, 0);               /* (10,11) */
     PRESS(d, a, false);                 /* FIRE */
     idle(d, 2);
     run_frame(d, NULL, true);           /* build phase, 4 towers ready */
@@ -324,7 +446,7 @@ static void scenario_wave(Driver *d)
             break;
         for (b = 0; b < MAX_BEAMS; b++) {
             if (d->app.game.beams[b].active) {
-                if ((d->frame % 12) == 0)
+                if ((d->frame % 20) == 0)
                     capture = true;
                 break;
             }
@@ -338,13 +460,13 @@ static void scenario_wave(Driver *d)
 }
 
 /* Place a tower, show the selected/upgrade panel, upgrade it, then sell it.
- * The tower sits on row 2 so the top screen shows it (and its range circle)
- * without the build-phase hint strip covering it. */
+ * The tower sits on row 11, directly above the road on row 12 (but not on it),
+ * so the top screen shows the tower, its range circle and the road together. */
 static void scenario_selected(Driver *d)
 {
     start_run_from_menu(d);
 
-    move_cursor(d, 4, 2);               /* (4,2) */
+    move_cursor(d, 4, 11);              /* (4,11) */
     PRESS(d, a, false);                 /* place FIRE (auto-selected) */
     idle(d, 2);
     run_frame(d, NULL, true);           /* selected panel + range circle */
@@ -414,6 +536,7 @@ typedef struct {
 static const ScenarioEntry kScenarios[] = {
     { "menu",     scenario_menu     },
     { "build",    scenario_build    },
+    { "maze",     scenario_maze     },
     { "wave",     scenario_wave     },
     { "selected", scenario_selected },
     { "gameover", scenario_gameover },
@@ -439,6 +562,8 @@ static int run_scenario(const char *name, const char *outdir, int seed,
     d.max_frames = max_frames;
     d.capture_every = capture_every;
     d.capture_seq = g_capture_seq;
+    d.path_initial = -1;
+    d.path_final = -1;
     d.last_top_sig = 0xFFFFFFFFu;
     d.last_bottom_sig = 0xFFFFFFFFu;
 
@@ -470,6 +595,8 @@ static int run_scenario(const char *name, const char *outdir, int seed,
 
     printf("--- scenario %s: %d capture(s), %d failure(s), %d identical-to-previous,",
            name, d.captures, d.failures, d.duplicates);
+    if (d.path_initial >= 0 && d.path_final >= 0)
+        printf(" path.length %d -> %d,", d.path_initial, d.path_final);
     printf(" %d frame(s) simulated\n", d.frame);
     if (d.captures == 0) {
         fprintf(stderr, "!!! scenario %s produced no screenshots\n", name);
@@ -490,7 +617,7 @@ static void usage(const char *argv0)
            "\n"
            "Usage: %s [options]\n"
            "\n"
-           "  --scenario NAME   menu | build | wave | selected | gameover |\n"
+           "  --scenario NAME   menu | build | maze | wave | selected | gameover |\n"
            "                    victory | all            (default: all)\n"
            "  --frames N        frame cap per scenario        (default: %d)\n"
            "  --capture-every K also capture every K-th frame (default: 0 = off)\n"
