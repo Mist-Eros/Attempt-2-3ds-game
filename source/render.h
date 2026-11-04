@@ -1,0 +1,122 @@
+/*
+ * Elemental Defense - top screen rendering + shared pixel-art helpers
+ *
+ * render.c owns the battlefield (top screen): background, path, grid, towers,
+ * enemies, beams, HUD strip, cursor, range previews and the menu / pause /
+ * result overlays.  The same file also implements the small pixel-art element
+ * icons that the bottom-screen UI reuses, so both screens look like one game.
+ *
+ * Everything here is portable C99 and only talks to gfx.h, exactly like
+ * app.c and ui.c, so the PC preview harness can render the same frames.
+ *
+ * Board geometry: the 26x13 board is drawn at 15 px per cell, i.e. 390x195 px,
+ * anchored at (5, 38) on the 400x240 top screen.  That leaves a 38 px HUD strip
+ * at the top and a 7 px margin at the bottom.  Cell space (see game.h) maps to
+ * top-screen pixels with `BOARD_X + cellX * BOARD_CELL`.
+ */
+#ifndef RENDER_H
+#define RENDER_H
+
+#include "app.h"
+#include "game.h"
+#include "gfx.h"
+
+/* ---- board geometry on the 400x240 top screen ---- */
+#define BOARD_CELL 15.0f
+#define BOARD_X 5.0f
+#define BOARD_Y 38.0f
+#define BOARD_W ((float)GRID_COLS * BOARD_CELL)     /* 390 */
+#define BOARD_H ((float)GRID_ROWS * BOARD_CELL)     /* 195 */
+#define HUD_H BOARD_Y                               /* top HUD strip height */
+
+/* ---- palette (sampled from the original LOE2D game) ------------------- */
+static const GfxColor COL_WHITE      = { 1.00f, 1.00f, 1.00f, 1.00f };
+static const GfxColor COL_PANEL      = { 0.04f, 0.04f, 0.10f, 0.95f };
+static const GfxColor COL_PANEL_SOLID= { 0.04f, 0.04f, 0.10f, 1.00f };
+static const GfxColor COL_BORDER     = { 0.15f, 0.15f, 0.30f, 0.40f };
+static const GfxColor COL_BORDER_HI  = { 0.30f, 0.30f, 0.55f, 0.60f };
+static const GfxColor COL_GOLD       = { 1.00f, 0.80f, 0.20f, 1.00f };
+static const GfxColor COL_GOLD_SOFT  = { 1.00f, 0.90f, 0.40f, 1.00f };
+static const GfxColor COL_MUTED      = { 0.50f, 0.50f, 0.70f, 0.65f };
+static const GfxColor COL_DIM        = { 0.38f, 0.38f, 0.58f, 0.55f };
+static const GfxColor COL_RED        = { 1.00f, 0.20f, 0.20f, 1.00f };
+static const GfxColor COL_GREEN      = { 0.20f, 0.90f, 0.25f, 1.00f };
+static const GfxColor COL_PATH       = { 0.26f, 0.15f, 0.06f, 1.00f };
+static const GfxColor COL_PATH_EDGE  = { 0.38f, 0.25f, 0.10f, 0.85f };
+static const GfxColor COL_CELL       = { 0.05f, 0.05f, 0.08f, 1.00f };
+static const GfxColor COL_GRIDLINE   = { 0.14f, 0.14f, 0.22f, 0.30f };
+static const GfxColor COL_YELLOW     = { 1.00f, 1.00f, 0.30f, 1.00f };
+static const GfxColor COL_BUILD_TAG  = { 1.00f, 1.00f, 0.40f, 1.00f };
+static const GfxColor COL_WAVE_TAG   = { 0.20f, 0.90f, 0.20f, 1.00f };
+
+/* Element colours, kept identical to game_tower_spec()/game_enemy_spec()
+ * unless the core content tables say otherwise.  Indexed by Element. */
+static const GfxColor COL_ELEMENT[TOWER_TYPE_COUNT] = {
+    { 0.95f, 0.15f, 0.15f, 1.00f },   /* ELEMENT_FIRE   */
+    { 0.15f, 0.40f, 0.95f, 1.00f },   /* ELEMENT_WATER  */
+    { 0.15f, 0.90f, 0.15f, 1.00f }    /* ELEMENT_FOREST */
+};
+static const GfxColor COL_ELEMENT_GLOW[TOWER_TYPE_COUNT] = {
+    { 0.95f, 0.30f, 0.10f, 1.00f },
+    { 0.10f, 0.50f, 0.95f, 1.00f },
+    { 0.10f, 0.90f, 0.30f, 1.00f }
+};
+
+/* ------------------------------------------------------------------------ */
+/* Screens                                                                   */
+/* ------------------------------------------------------------------------ */
+
+/* Draws the complete top screen for the current phase, including menu, pause
+ * and result overlays.  Prefer this entry point; it is what app_draw calls. */
+void render_top(const App *app);
+
+/* Lower level pieces.  They do NOT clear the screen, on the assumption that
+ * the caller (render_top) has already painted the gradient background. */
+void render_menu_top(const App *app);
+void render_game_top(const App *app);
+void render_pause_overlay_top(void);
+void render_result_overlay_top(const App *app);
+
+/* Paints the dark vertical gradient used by every screen. */
+void render_background_gradient(int width, int height);
+
+/* ------------------------------------------------------------------------ */
+/* Shared pixel-art helpers (used by render.c and ui.c)                       */
+/* ------------------------------------------------------------------------ */
+
+/* Cell space -> top-screen pixels. */
+float cell_px_x(float cellX);
+float cell_px_y(float cellY);
+float board_cell_left(int col);
+float board_cell_top(int row);
+/* Top-screen pixels -> board cell.  Returns false when (px,py) is outside the
+ * board, otherwise writes col/row (already clamped to the grid if outside by
+ * a fraction of a cell is handled by the caller). */
+bool board_hit_cell(float px, float py, int *col, int *row);
+
+/* Pixel-art element glyphs.  `cx/cy` is the centre, `size` roughly half the
+ * height of the drawn glyph in pixels.  element is one of ELEMENT_FIRE,
+ * ELEMENT_WATER, ELEMENT_FOREST. */
+void art_fire(float cx, float cy, float size, GfxColor color);
+void art_water(float cx, float cy, float size, GfxColor color);
+void art_leaf(float cx, float cy, float size, GfxColor color);
+void art_star(float cx, float cy, float size, GfxColor color);
+void art_element(float cx, float cy, float size, int element);
+void art_element_colored(float cx, float cy, float size, int element, GfxColor color);
+
+void art_coin(float cx, float cy, float radius);
+void art_heart(float cx, float cy, float size, GfxColor color);
+void art_glow(float cx, float cy, float radius, GfxColor color, float alpha);
+
+/* Health bar centred on cx; y is the top edge.  frac in 0..1, green -> red. */
+void art_health_bar(float cx, float y, float width, float height, float frac);
+
+/* Text helpers (8x8 font, integer scale).  Fractions are floored so glyphs
+ * always land on whole pixels. */
+void text_centered(float cx, float y, float scale, GfxColor color, const char *text);
+void text_right(float rightX, float y, float scale, GfxColor color, const char *text);
+
+/* Converts a TowerSpec/EnemySpec colour triplet to a GfxColor. */
+GfxColor art_spec_color(const float rgb[3], float alpha);
+
+#endif /* RENDER_H */

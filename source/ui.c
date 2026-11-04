@@ -1,0 +1,814 @@
+/*
+ * Elemental Defense - bottom screen (touch) UI
+ *
+ * Layout is hand-packed into 320x240 and optimised for the 8x8 bitmap font at
+ * scale 1 (labels) and scale 2 (numbers / main buttons).  Every interactive
+ * element has a matching ui_*_rect() function so the drawing code and the hit
+ * test can never drift apart, and so the PC preview harness can click buttons
+ * by name.
+ *
+ * Vertical budget for the play screens:
+ *   0  .. 31    header: gold | lives | wave | speed badge | pause badge
+ *   34 .. 86    tower palette (3 buttons, 96x52)
+ *   89 .. 155   info panel (selected/cursor tower stats + UPGRADE / SELL)
+ *   159.. 236   NEXT WAVE + incoming preview   (build phase)
+ *               wave progress + SPEED / PAUSE  (wave phase)
+ *
+ * Placement note: the top screen is not touch sensitive on a 3DS, so towers
+ * are built by moving the D-pad cursor and pressing A.  The bottom palette is
+ * still tappable because it selects which tower type A will build.
+ */
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "ui.h"
+
+#include "game.h"
+#include "render.h"
+
+/* ------------------------------------------------------------------------ */
+/* Layout                                                                    */
+/* ------------------------------------------------------------------------ */
+
+#define HEADER_H 32.0f
+#define PALETTE_Y 34.0f
+#define PALETTE_H 52.0f
+#define PANEL_X 4.0f
+#define PANEL_Y 89.0f
+#define PANEL_W 312.0f
+#define PANEL_H 66.0f
+#define BOTTOM_Y 159.0f
+#define BOTTOM_H 77.0f
+
+bool ui_rect_contains(UiRect r, float x, float y)
+{
+    return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+}
+
+UiRect ui_start_rect(void)
+{
+    UiRect r = { 50.0f, 124.0f, 220.0f, 64.0f };
+    return r;
+}
+
+UiRect ui_tower_button_rect(int type)
+{
+    UiRect r;
+
+    if (type < 0)
+        type = 0;
+    if (type >= TOWER_TYPE_COUNT)
+        type = TOWER_TYPE_COUNT - 1;
+
+    r.w = 96.0f;
+    r.h = PALETTE_H;
+    r.x = 6.0f + (float)type * 104.0f;   /* 6, 110, 214 with 8 px gaps */
+    r.y = PALETTE_Y;
+    return r;
+}
+
+UiRect ui_upgrade_rect(void)
+{
+    UiRect r = { 8.0f, 120.0f, 150.0f, 30.0f };
+    return r;
+}
+
+UiRect ui_sell_rect(void)
+{
+    UiRect r = { 164.0f, 120.0f, 148.0f, 30.0f };
+    return r;
+}
+
+UiRect ui_next_wave_rect(void)
+{
+    UiRect r = { 6.0f, BOTTOM_Y, 190.0f, BOTTOM_H };
+    return r;
+}
+
+UiRect ui_speed_rect(void)
+{
+    UiRect r = { 244.0f, 2.0f, 34.0f, 28.0f };
+    return r;
+}
+
+UiRect ui_pause_rect(void)
+{
+    UiRect r = { 282.0f, 2.0f, 34.0f, 28.0f };
+    return r;
+}
+
+/* The wave-phase row no longer carries its own speed/pause buttons (two
+ * controls for one action was confusing); the header badges above are the one
+ * touch control set.  These accessors are kept as aliases so the preview
+ * harness / earlier callers do not need to change. */
+UiRect ui_wave_speed_rect(void)
+{
+    return ui_speed_rect();
+}
+
+UiRect ui_wave_pause_rect(void)
+{
+    return ui_pause_rect();
+}
+
+UiRect ui_resume_rect(void)
+{
+    UiRect r = { 60.0f, 104.0f, 200.0f, 52.0f };
+    return r;
+}
+
+UiRect ui_pause_menu_rect(void)
+{
+    UiRect r = { 100.0f, 168.0f, 120.0f, 28.0f };
+    return r;
+}
+
+UiRect ui_retry_rect(void)
+{
+    UiRect r = { 40.0f, 140.0f, 240.0f, 56.0f };
+    return r;
+}
+
+UiRect ui_result_menu_rect(void)
+{
+    UiRect r = { 80.0f, 204.0f, 160.0f, 28.0f };
+    return r;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Drawing helpers                                                           */
+/* ------------------------------------------------------------------------ */
+
+static GfxColor rgba(float r, float g, float b, float a)
+{
+    return gfx_rgba(r, g, b, a);
+}
+
+static void fill_panel(UiRect r)
+{
+    gfx_fill_rect(r.x, r.y, r.w, r.h, COL_PANEL);
+    gfx_outline_rect(r.x, r.y, r.w, r.h, 1.0f, COL_BORDER);
+}
+
+static void panel_with_title(UiRect r, const char *title)
+{
+    fill_panel(r);
+    if (title != NULL)
+        text_centered(r.x + r.w * 0.5f, r.y + 3.0f, 1.0f, COL_MUTED, title);
+}
+
+static void draw_button_frame(UiRect r, GfxColor fill, GfxColor border, bool enabled)
+{
+    GfxColor body = fill;
+    GfxColor edge = border;
+
+    if (!enabled) {
+        body.a *= 0.45f;
+        edge.a *= 0.45f;
+    }
+
+    gfx_fill_rect(r.x + 2.0f, r.y + 2.0f, r.w, r.h, rgba(0.0f, 0.0f, 0.0f, 0.35f));
+    gfx_fill_rect(r.x, r.y, r.w, r.h, body);
+    gfx_fill_rect(r.x + 2.0f, r.y + 2.0f, r.w - 4.0f, r.h * 0.42f,
+                  rgba(1.0f, 1.0f, 1.0f, enabled ? 0.10f : 0.05f));
+    gfx_outline_rect(r.x, r.y, r.w, r.h, 1.0f, edge);
+}
+
+/* The tower index shown in the info panel: the explicitly selected tower wins,
+ * otherwise whatever sits under the D-pad cursor. */
+static int panel_tower_index(const App *app)
+{
+    const Game *g = &app->game;
+
+    if (g->selectedTower >= 0 && g->selectedTower < g->towerCount &&
+        g->towers[g->selectedTower].active)
+        return g->selectedTower;
+    return game_tower_at(g, g->cursorCol, g->cursorRow);
+}
+
+static bool cell_is_path(const Game *g, int col, int row)
+{
+    int i;
+
+    for (i = 0; i < g->path.count; i++) {
+        int pc = (int)floorf(g->path.pts[i].x);
+        int pr = (int)floorf(g->path.pts[i].y);
+        if (pc == col && pr == row)
+            return true;
+    }
+    return false;
+}
+
+static void speed_text(float multiplier, char *buf, size_t size)
+{
+    snprintf(buf, size, "%.0fX", (double)multiplier);
+}
+
+/* One row of the "incoming" panel: element glyph + "xCOUNT".  Elite rows use
+ * the gold star instead of an element glyph. */
+static void draw_preview_row(float x, float y, int count, bool elite, int element)
+{
+    char buf[16];
+    GfxColor color;
+
+    if (elite) {
+        art_star(x + 8.0f, y + 4.0f, 4.0f, COL_GOLD);
+        color = COL_GOLD;
+    } else {
+        if (element < 0 || element >= TOWER_TYPE_COUNT)
+            element = 0;
+        color = COL_ELEMENT[element];
+        art_element_colored(x + 8.0f, y + 4.0f, 4.0f, element, color);
+    }
+
+    snprintf(buf, sizeof(buf), "x%d", count);
+    gfx_text(x + 18.0f, y, 1.0f, rgba(color.r, color.g, color.b, 0.90f), buf);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Menu screen                                                               */
+/* ------------------------------------------------------------------------ */
+
+static void draw_menu(const App *app)
+{
+    char buf[64];
+    int i;
+
+    /* layered title */
+    art_glow(160.0f, 40.0f, 130.0f, COL_GOLD, 0.10f);
+    text_centered(161.0f, 17.0f, 3.0f, rgba(0.25f, 0.15f, 0.03f, 0.9f), "ELEMENTAL");
+    text_centered(160.0f, 14.0f, 3.0f, COL_GOLD_SOFT, "ELEMENTAL");
+    text_centered(160.0f, 44.0f, 2.0f, COL_WHITE, "DEFENSE");
+    text_centered(160.0f, 66.0f, 1.0f, COL_MUTED, "TOWER DEFENSE");
+
+    /* element icons */
+    for (i = 0; i < TOWER_TYPE_COUNT; i++) {
+        float cx = 80.0f + (float)i * 80.0f;
+        float bob = sinf(app->menuTime * 2.0f + (float)i * 1.7f) * 1.5f;
+        float cy = 92.0f + bob;
+        GfxColor color = COL_ELEMENT[i];
+        GfxColor glow = COL_ELEMENT_GLOW[i];
+        const TowerSpec *spec = game_tower_spec(i);
+
+        art_glow(cx, cy, 26.0f, glow, 0.22f);
+        art_element_colored(cx, cy, 12.0f, i, color);
+        text_centered(cx, 110.0f, 1.0f, rgba(color.r, color.g, color.b, 0.85f),
+                      spec != NULL ? spec->name : "");
+    }
+
+    /* START button */
+    {
+        UiRect start = ui_start_rect();
+        float cx = start.x + start.w * 0.5f;
+
+        art_glow(cx, start.y + start.h * 0.5f, 110.0f, COL_RED, 0.14f);
+        gfx_fill_rect(start.x + 3.0f, start.y + 3.0f, start.w, start.h,
+                      rgba(0.0f, 0.0f, 0.0f, 0.30f));
+        gfx_fill_rect(start.x, start.y, start.w, start.h,
+                      rgba(0.85f, 0.15f, 0.15f, 1.0f));
+        gfx_fill_rect(start.x + 3.0f, start.y + 3.0f, start.w - 6.0f,
+                      start.h * 0.5f, rgba(1.0f, 0.30f, 0.30f, 0.30f));
+        gfx_outline_rect(start.x, start.y, start.w, start.h, 1.0f,
+                         rgba(1.0f, 0.45f, 0.45f, 0.55f));
+        text_centered(cx, start.y + 12.0f, 3.0f, COL_WHITE, "START");
+        text_centered(cx, start.y + 44.0f, 1.0f, rgba(1.0f, 0.85f, 0.85f, 0.85f),
+                      "TAP OR PRESS A");
+    }
+
+    snprintf(buf, sizeof(buf), "D-PAD TO BUILD - TOUCH FOR BUTTONS");
+    text_centered(160.0f, 198.0f, 1.0f, COL_DIM, buf);
+    text_centered(160.0f, 214.0f, 1.0f, COL_DIM, "SELECT SPEED - START PAUSE");
+    text_centered(160.0f, 228.0f, 1.0f, rgba(0.30f, 0.30f, 0.50f, 0.60f),
+                  "A NATIVE 3DS REMAKE");
+}
+
+/* ------------------------------------------------------------------------ */
+/* Play header                                                               */
+/* ------------------------------------------------------------------------ */
+
+static void draw_header(const App *app)
+{
+    const Game *g = &app->game;
+    char buf[32];
+    UiRect speed = ui_speed_rect();
+    UiRect pause = ui_pause_rect();
+    float speedCx = speed.x + speed.w * 0.5f;
+
+    gfx_fill_rect(0.0f, 0.0f, (float)BOT_W, HEADER_H,
+                  rgba(0.035f, 0.035f, 0.09f, 1.0f));
+    gfx_fill_rect(0.0f, HEADER_H - 1.0f, (float)BOT_W, 1.0f,
+                  rgba(0.20f, 0.20f, 0.38f, 0.45f));
+
+    /* gold */
+    art_coin(14.0f, 16.0f, 6.0f);
+    snprintf(buf, sizeof(buf), "%d", g->gold);
+    gfx_text(26.0f, 8.0f, 2.0f, COL_GOLD, buf);
+
+    /* lives */
+    art_heart(100.0f, 16.0f, 6.0f, COL_RED);
+    snprintf(buf, sizeof(buf), "%d", g->lives);
+    gfx_text(112.0f, 8.0f, 2.0f, COL_WHITE, buf);
+
+    /* wave: single line so the two header buttons fit on the right */
+    gfx_text(160.0f, 12.0f, 1.0f, COL_MUTED, "WAVE");
+    snprintf(buf, sizeof(buf), "%d/%d", g->wave, g->totalWaves);
+    gfx_text(200.0f, 12.0f, 1.0f, COL_WHITE, buf);
+
+    /* speed badge: the one and only touch control for game speed */
+    gfx_fill_rect(speed.x, speed.y, speed.w, speed.h, rgba(0.08f, 0.08f, 0.16f, 1.0f));
+    gfx_fill_rect(speed.x + 2.0f, speed.y + 2.0f, speed.w - 4.0f, speed.h * 0.40f,
+                  rgba(1.0f, 1.0f, 1.0f, 0.08f));
+    gfx_outline_rect(speed.x, speed.y, speed.w, speed.h, 1.0f,
+                     rgba(0.30f, 0.30f, 0.60f, 0.80f));
+    speed_text(g->speedMultiplier, buf, sizeof(buf));
+    text_centered(speedCx, speed.y + 7.0f, 2.0f,
+                  g->speedMultiplier > 1.0f ? COL_YELLOW : COL_WHITE, buf);
+
+    /* pause badge */
+    gfx_fill_rect(pause.x, pause.y, pause.w, pause.h, rgba(0.08f, 0.08f, 0.16f, 1.0f));
+    gfx_fill_rect(pause.x + 2.0f, pause.y + 2.0f, pause.w - 4.0f, pause.h * 0.40f,
+                  rgba(1.0f, 1.0f, 1.0f, 0.08f));
+    gfx_outline_rect(pause.x, pause.y, pause.w, pause.h, 1.0f,
+                     rgba(0.30f, 0.30f, 0.60f, 0.80f));
+    gfx_fill_rect(pause.x + 10.0f, pause.y + 8.0f, 5.0f, 12.0f, COL_WHITE);
+    gfx_fill_rect(pause.x + 19.0f, pause.y + 8.0f, 5.0f, 12.0f, COL_WHITE);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Tower palette                                                             */
+/* ------------------------------------------------------------------------ */
+
+static void draw_tower_palette(const App *app)
+{
+    const Game *g = &app->game;
+    char buf[16];
+    int i;
+
+    for (i = 0; i < TOWER_TYPE_COUNT; i++) {
+        UiRect r = ui_tower_button_rect(i);
+        const TowerSpec *spec = game_tower_spec(i);
+        const char *name = spec != NULL ? spec->name : "???";
+        int cost = spec != NULL ? spec->cost : 0;
+        GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
+                                      : COL_ELEMENT[i];
+        GfxColor glow = spec != NULL ? art_spec_color(spec->glow, 1.0f)
+                                     : COL_ELEMENT_GLOW[i];
+        bool selected = g->selectedType == i;
+
+        if (selected)
+            art_glow(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 54.0f, glow, 0.10f);
+
+        gfx_fill_rect(r.x, r.y, r.w, r.h,
+                      selected ? rgba(color.r, color.g, color.b, 0.16f)
+                               : rgba(0.07f, 0.07f, 0.13f, 1.0f));
+        gfx_outline_rect(r.x, r.y, r.w, r.h, selected ? 2.0f : 1.0f,
+                         selected ? rgba(color.r, color.g, color.b, 0.90f)
+                                  : rgba(0.15f, 0.15f, 0.28f, 0.80f));
+
+        art_glow(r.x + 18.0f, r.y + 30.0f, 16.0f, glow, selected ? 0.30f : 0.16f);
+        art_element_colored(r.x + 18.0f, r.y + 30.0f, 10.0f, i, color);
+
+        gfx_text(r.x + 34.0f, r.y + 9.0f, 1.0f,
+                 selected ? COL_WHITE : rgba(0.85f, 0.85f, 0.95f, 0.90f), name);
+
+        art_coin(r.x + 41.0f, r.y + 35.0f, 4.0f);
+        snprintf(buf, sizeof(buf), "%d", cost);
+        gfx_text(r.x + 48.0f, r.y + 31.0f, 1.0f,
+                 g->gold >= cost ? COL_GOLD : rgba(0.75f, 0.55f, 0.20f, 0.65f), buf);
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Info / upgrade panel                                                      */
+/* ------------------------------------------------------------------------ */
+
+static void draw_upgrade_sell(const App *app, int towerIndex)
+{
+    const Game *g = &app->game;
+    const Tower *tower = &g->towers[towerIndex];
+    char buf[32];
+    int upgradeCost = game_upgrade_cost(g, towerIndex);
+    int sellValue = game_sell_value(g, towerIndex);
+    bool canUpgrade = upgradeCost >= 0 && g->gold >= upgradeCost;
+    UiRect up = ui_upgrade_rect();
+    UiRect sell = ui_sell_rect();
+
+    if (upgradeCost < 0)
+        snprintf(buf, sizeof(buf), "MAX LEVEL");
+    else
+        snprintf(buf, sizeof(buf), "UPGRADE %dG", upgradeCost);
+    draw_button_frame(up, rgba(0.10f, 0.35f, 0.15f, 1.0f),
+                      rgba(0.30f, 0.90f, 0.40f, 0.80f), canUpgrade);
+    text_centered(up.x + up.w * 0.5f, up.y + 11.0f, 1.0f,
+                  canUpgrade ? COL_WHITE : COL_DIM, buf);
+
+    if (sellValue < 0)
+        sellValue = 0;
+    snprintf(buf, sizeof(buf), "SELL +%dG", sellValue);
+    draw_button_frame(sell, rgba(0.35f, 0.10f, 0.10f, 1.0f),
+                      rgba(0.90f, 0.30f, 0.30f, 0.80f), true);
+    text_centered(sell.x + sell.w * 0.5f, sell.y + 11.0f, 1.0f, COL_WHITE, buf);
+
+    (void)tower;
+}
+
+static void draw_info_panel(const App *app)
+{
+    const Game *g = &app->game;
+    UiRect panel = { PANEL_X, PANEL_Y, PANEL_W, PANEL_H };
+    int towerIndex = panel_tower_index(app);
+    char buf[64];
+
+    fill_panel(panel);
+
+    if (towerIndex >= 0 && towerIndex < g->towerCount &&
+        g->towers[towerIndex].active) {
+        const Tower *tower = &g->towers[towerIndex];
+        const TowerSpec *spec = game_tower_spec(tower->element);
+        GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
+                                      : COL_ELEMENT[tower->element % TOWER_TYPE_COUNT];
+        float damage = 0.0f;
+        float fireRate = 1.0f;
+        float range = 0.0f;
+        float dps;
+
+        game_tower_stats(tower->element, (int)tower->level, &damage, &fireRate, &range);
+        dps = fireRate > 0.0f ? damage / fireRate : 0.0f;
+
+        art_glow(16.0f, 99.0f, 12.0f, color, 0.18f);
+        art_element_colored(16.0f, 99.0f, 5.5f, tower->element, color);
+
+        snprintf(buf, sizeof(buf), "%s LV.%d", spec != NULL ? spec->name : "TOWER",
+                 (int)tower->level);
+        gfx_text(30.0f, 92.0f, 1.0f, color, buf);
+
+        snprintf(buf, sizeof(buf), "DMG %.1f   RNG %.1f   DPS %.1f",
+                 (double)damage, (double)range, (double)dps);
+        gfx_text(10.0f, 107.0f, 1.0f, COL_MUTED, buf);
+
+        draw_upgrade_sell(app, towerIndex);
+    } else {
+        bool isPath = cell_is_path(g, g->cursorCol, g->cursorRow);
+        const TowerSpec *selectedSpec = game_tower_spec(g->selectedType);
+        const char *name = selectedSpec != NULL ? selectedSpec->name : "TOWER";
+        int cost = selectedSpec != NULL ? selectedSpec->cost : 0;
+
+        snprintf(buf, sizeof(buf), "CURSOR C%d R%d", g->cursorCol, g->cursorRow);
+        gfx_text(10.0f, 93.0f, 1.0f, COL_MUTED, buf);
+        text_right(308.0f, 93.0f, 1.0f, isPath ? COL_GOLD : COL_DIM,
+                   isPath ? "PATH CELL" : "EMPTY CELL");
+
+        if (isPath)
+            snprintf(buf, sizeof(buf), "PATH CELL - ENEMIES WALK HERE");
+        else
+            snprintf(buf, sizeof(buf), "A BUILDS %s FOR %dG", name, cost);
+        gfx_text(10.0f, 108.0f, 1.0f,
+                 isPath ? COL_GOLD : COL_WHITE, buf);
+
+        gfx_text(10.0f, 124.0f, 1.0f, COL_DIM,
+                 "L/R TYPE   A BUILD   B CLEAR");
+        gfx_text(10.0f, 138.0f, 1.0f, COL_DIM,
+                 "TAP A TYPE ABOVE TO SWITCH");
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Transient message toast                                                   */
+/* ------------------------------------------------------------------------ */
+
+static void draw_message(const App *app)
+{
+    const Game *g = &app->game;
+    float alpha;
+    float width;
+    float x;
+    char buf[40];
+
+    if (g->messageTimer <= 0.0f || g->message[0] == '\0')
+        return;
+
+    alpha = g->messageTimer > 0.4f ? 1.0f : g->messageTimer / 0.4f;
+    if (alpha < 0.0f)
+        alpha = 0.0f;
+    if (alpha > 1.0f)
+        alpha = 1.0f;
+
+    snprintf(buf, sizeof(buf), "%.36s", g->message);
+    width = gfx_text_width(buf, 1.0f) + 18.0f;
+    if (width > 302.0f)
+        width = 302.0f;
+    x = floorf(((float)BOT_W - width) * 0.5f);
+
+    gfx_fill_rect(x, 35.0f, width, 18.0f, rgba(0.05f, 0.02f, 0.02f, 0.92f * alpha));
+    gfx_outline_rect(x, 35.0f, width, 18.0f, 1.0f,
+                     rgba(1.0f, 0.25f, 0.25f, 0.75f * alpha));
+    text_centered((float)BOT_W * 0.5f, 40.0f, 1.0f,
+                  rgba(1.0f, 0.55f, 0.55f, alpha), buf);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Build phase: NEXT WAVE + incoming preview                                 */
+/* ------------------------------------------------------------------------ */
+
+static void draw_build_section(const App *app)
+{
+    const Game *g = &app->game;
+    UiRect next = ui_next_wave_rect();
+    UiRect preview = { 202.0f, BOTTOM_Y, 112.0f, BOTTOM_H };
+    char buf[40];
+    int fire = 0, water = 0, forest = 0, elite = 0;
+
+    /* next wave button */
+    art_glow(next.x + next.w * 0.5f, next.y + next.h * 0.5f, 100.0f, COL_GREEN,
+             0.10f);
+    gfx_fill_rect(next.x + 3.0f, next.y + 3.0f, next.w, next.h,
+                  rgba(0.0f, 0.0f, 0.0f, 0.35f));
+    gfx_fill_rect(next.x, next.y, next.w, next.h,
+                  rgba(0.13f, 0.45f, 0.20f, 1.0f));
+    gfx_fill_rect(next.x + 3.0f, next.y + 3.0f, next.w - 6.0f, next.h * 0.45f,
+                  rgba(0.40f, 1.00f, 0.50f, 0.12f));
+    gfx_outline_rect(next.x, next.y, next.w, next.h, 2.0f,
+                     rgba(0.45f, 1.00f, 0.50f, 0.70f));
+
+    text_centered(next.x + next.w * 0.5f, next.y + 10.0f, 2.0f, COL_WHITE,
+                  "NEXT WAVE");
+    snprintf(buf, sizeof(buf), "WAVE %d OF %d", g->wave, g->totalWaves);
+    text_centered(next.x + next.w * 0.5f, next.y + 34.0f, 1.0f,
+                  rgba(0.85f, 1.00f, 0.90f, 0.90f), buf);
+    text_centered(next.x + next.w * 0.5f, next.y + 48.0f, 1.0f,
+                  rgba(0.75f, 0.95f, 0.80f, 0.70f), "PRESS WHEN READY");
+
+    /* incoming composition */
+    panel_with_title(preview, "INCOMING");
+    game_wave_preview(g, &fire, &water, &forest, &elite);
+    draw_preview_row(preview.x + 10.0f, preview.y + 20.0f, fire, false, 0);
+    draw_preview_row(preview.x + 10.0f, preview.y + 34.0f, water, false, 1);
+    draw_preview_row(preview.x + 10.0f, preview.y + 48.0f, forest, false, 2);
+    draw_preview_row(preview.x + 10.0f, preview.y + 62.0f, elite, true, 0);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Wave phase: progress + stats (speed/pause live in the header badges)      */
+/* ------------------------------------------------------------------------ */
+
+static void draw_wave_section(const App *app)
+{
+    const Game *g = &app->game;
+    UiRect panel = { 6.0f, BOTTOM_Y, 308.0f, BOTTOM_H };
+    char buf[40];
+    int fire = 0, water = 0, forest = 0, elite = 0;
+    int total;
+    int remaining;
+    float frac;
+
+    fill_panel(panel);
+
+    snprintf(buf, sizeof(buf), "WAVE %d IN PROGRESS", g->wave);
+    gfx_text(14.0f, 163.0f, 1.0f, COL_WHITE, buf);
+
+    game_wave_preview(g, &fire, &water, &forest, &elite);
+    total = fire + water + forest + elite;
+    remaining = g->enemiesAlive + g->enemiesToSpawn;
+    if (remaining < 0)
+        remaining = 0;
+    frac = total > 0 ? 1.0f - (float)remaining / (float)total : 0.0f;
+    if (frac < 0.0f)
+        frac = 0.0f;
+    if (frac > 1.0f)
+        frac = 1.0f;
+
+    /* chunky progress bar: readable at arm's length on the 240p LCD */
+    gfx_fill_rect(14.0f, 174.0f, 292.0f, 16.0f, rgba(0.08f, 0.08f, 0.14f, 1.0f));
+    gfx_fill_rect(16.0f, 176.0f, 288.0f * frac, 12.0f,
+                  rgba(0.95f, 0.60f, 0.15f, 1.0f));
+    gfx_outline_rect(14.0f, 174.0f, 292.0f, 16.0f, 1.0f,
+                     rgba(0.30f, 0.30f, 0.55f, 0.80f));
+    snprintf(buf, sizeof(buf), "CLEARED %d%%   LEFT %d", (int)(frac * 100.0f + 0.5f),
+             remaining);
+    text_centered(160.0f, 178.0f, 1.0f, rgba(1.0f, 1.0f, 1.0f, 0.92f), buf);
+
+    snprintf(buf, sizeof(buf), "ALIVE %d", g->enemiesAlive);
+    gfx_text(14.0f, 196.0f, 1.0f, COL_WHITE, buf);
+    snprintf(buf, sizeof(buf), "QUEUED %d", g->enemiesToSpawn);
+    gfx_text(112.0f, 196.0f, 1.0f, COL_MUTED, buf);
+    snprintf(buf, sizeof(buf), "KILLS %d", g->kills);
+    gfx_text(212.0f, 196.0f, 1.0f, COL_MUTED, buf);
+
+    snprintf(buf, sizeof(buf), "LEAKS %d", g->leaks);
+    gfx_text(14.0f, 208.0f, 1.0f, g->leaks > 0 ? COL_RED : COL_MUTED, buf);
+    snprintf(buf, sizeof(buf), "TOWERS %d", g->towerCount);
+    gfx_text(112.0f, 208.0f, 1.0f, COL_MUTED, buf);
+    {
+        int seconds = (int)g->timeTotal;
+        if (seconds < 0)
+            seconds = 0;
+        snprintf(buf, sizeof(buf), "TIME %d:%02d", seconds / 60, seconds % 60);
+        gfx_text(212.0f, 208.0f, 1.0f, COL_MUTED, buf);
+    }
+
+    text_centered(160.0f, 222.0f, 1.0f, COL_DIM,
+                  "START: PAUSE    SELECT: SPEED");
+}
+
+/* ------------------------------------------------------------------------ */
+/* Pause overlay                                                             */
+/* ------------------------------------------------------------------------ */
+
+static void draw_pause_overlay(void)
+{
+    UiRect panel = { 50.0f, 24.0f, 220.0f, 196.0f };
+    UiRect resume = ui_resume_rect();
+    UiRect menu = ui_pause_menu_rect();
+
+    gfx_fill_rect(0.0f, 0.0f, (float)BOT_W, (float)BOT_H,
+                  rgba(0.0f, 0.0f, 0.0f, 0.65f));
+    fill_panel(panel);
+
+    text_centered(160.0f, 40.0f, 3.0f, COL_WHITE, "PAUSED");
+    text_centered(160.0f, 74.0f, 1.0f, COL_MUTED, "THE WAVE IS FROZEN");
+
+    art_glow(resume.x + resume.w * 0.5f, resume.y + resume.h * 0.5f, 90.0f,
+             COL_GREEN, 0.10f);
+    draw_button_frame(resume, rgba(0.12f, 0.40f, 0.18f, 1.0f),
+                      rgba(0.40f, 1.00f, 0.50f, 0.80f), true);
+    text_centered(resume.x + resume.w * 0.5f, resume.y + 14.0f, 2.0f, COL_WHITE,
+                  "RESUME");
+
+    draw_button_frame(menu, rgba(0.10f, 0.10f, 0.18f, 1.0f),
+                      rgba(0.30f, 0.30f, 0.60f, 0.80f), true);
+    text_centered(menu.x + menu.w * 0.5f, menu.y + 10.0f, 1.0f, COL_WHITE,
+                  "MAIN MENU");
+
+    text_centered(160.0f, 208.0f, 1.0f, COL_MUTED, "START ALSO RESUMES");
+}
+
+/* ------------------------------------------------------------------------ */
+/* Result screen                                                             */
+/* ------------------------------------------------------------------------ */
+
+static void draw_result(const App *app)
+{
+    const Game *g = &app->game;
+    bool victory = g->phase == PHASE_VICTORY;
+    UiRect retry = ui_retry_rect();
+    UiRect menu = ui_result_menu_rect();
+    UiRect stats = { 30.0f, 64.0f, 260.0f, 66.0f };
+    char buf[64];
+    int seconds = (int)g->timeTotal;
+    int shownWave = g->wave > g->totalWaves ? g->totalWaves : g->wave;
+
+    if (seconds < 0)
+        seconds = 0;
+
+    art_glow(160.0f, 40.0f, 140.0f, victory ? COL_GOLD : COL_RED, 0.12f);
+    text_centered(160.0f, 14.0f, 4.0f, victory ? COL_GOLD_SOFT : COL_RED,
+                  victory ? "VICTORY!" : "GAME OVER");
+    text_centered(160.0f, 52.0f, 1.0f, COL_MUTED,
+                  victory ? "ALL WAVES CLEARED" : "THE PATH WAS BREACHED");
+
+    fill_panel(stats);
+    snprintf(buf, sizeof(buf), "WAVE %d/%d", shownWave, g->totalWaves);
+    text_centered(160.0f, 71.0f, 1.0f, COL_WHITE, buf);
+    snprintf(buf, sizeof(buf), "KILLS %d     LEAKS %d", g->kills, g->leaks);
+    text_centered(160.0f, 87.0f, 1.0f, COL_MUTED, buf);
+    snprintf(buf, sizeof(buf), "TIME %d:%02d     GOLD %d", seconds / 60,
+             seconds % 60, g->gold);
+    text_centered(160.0f, 103.0f, 1.0f, COL_MUTED, buf);
+
+    art_glow(retry.x + retry.w * 0.5f, retry.y + retry.h * 0.5f, 110.0f,
+             COL_GREEN, 0.12f);
+    draw_button_frame(retry, rgba(0.12f, 0.40f, 0.18f, 1.0f),
+                      rgba(0.40f, 1.00f, 0.50f, 0.80f), true);
+    text_centered(retry.x + retry.w * 0.5f, retry.y + 11.0f, 2.0f, COL_WHITE,
+                  "PLAY AGAIN");
+    text_centered(retry.x + retry.w * 0.5f, retry.y + 38.0f, 1.0f,
+                  rgba(0.85f, 1.00f, 0.90f, 0.80f), "TAP TO RETRY");
+
+    draw_button_frame(menu, rgba(0.10f, 0.10f, 0.18f, 1.0f),
+                      rgba(0.30f, 0.30f, 0.60f, 0.80f), true);
+    text_centered(menu.x + menu.w * 0.5f, menu.y + 10.0f, 1.0f, COL_WHITE,
+                  "MAIN MENU");
+}
+
+/* ------------------------------------------------------------------------ */
+/* Entry point                                                               */
+/* ------------------------------------------------------------------------ */
+
+void ui_draw(const App *app)
+{
+    const Game *g = &app->game;
+
+    render_background_gradient(BOT_W, BOT_H);
+
+    if (g->phase == PHASE_MENU) {
+        draw_menu(app);
+        return;
+    }
+    if (g->phase == PHASE_GAMEOVER || g->phase == PHASE_VICTORY) {
+        draw_result(app);
+        return;
+    }
+
+    draw_header(app);
+    draw_tower_palette(app);
+    draw_info_panel(app);
+    draw_message(app);
+
+    if (g->phase == PHASE_BUILD)
+        draw_build_section(app);
+    else
+        draw_wave_section(app);
+
+    if (g->paused)
+        draw_pause_overlay();
+}
+
+/* ------------------------------------------------------------------------ */
+/* Hit testing                                                               */
+/* ------------------------------------------------------------------------ */
+
+bool ui_hit_test(const App *app, float x, float y, UiEvent *ev)
+{
+    const Game *g = &app->game;
+    UiEvent local;
+    int i;
+    int towerIndex;
+
+    if (ev == NULL)
+        ev = &local;
+    ev->type = UI_EVENT_NONE;
+    ev->index = 0;
+
+    if (app == NULL)
+        return false;
+
+    if (g->phase == PHASE_MENU) {
+        if (ui_rect_contains(ui_start_rect(), x, y)) {
+            ev->type = UI_EVENT_START;
+            return true;
+        }
+        return false;
+    }
+
+    if (g->phase == PHASE_GAMEOVER || g->phase == PHASE_VICTORY) {
+        if (ui_rect_contains(ui_retry_rect(), x, y)) {
+            ev->type = UI_EVENT_RETRY;
+            return true;
+        }
+        if (ui_rect_contains(ui_result_menu_rect(), x, y)) {
+            ev->type = UI_EVENT_MENU;
+            return true;
+        }
+        return false;
+    }
+
+    /* play phases */
+    if (g->paused) {
+        if (ui_rect_contains(ui_resume_rect(), x, y)) {
+            ev->type = UI_EVENT_RESUME;
+            return true;
+        }
+        if (ui_rect_contains(ui_pause_menu_rect(), x, y)) {
+            ev->type = UI_EVENT_MENU;
+            return true;
+        }
+        return false;
+    }
+
+    if (ui_rect_contains(ui_speed_rect(), x, y)) {
+        ev->type = UI_EVENT_CYCLE_SPEED;
+        return true;
+    }
+    if (ui_rect_contains(ui_pause_rect(), x, y)) {
+        ev->type = UI_EVENT_TOGGLE_PAUSE;
+        return true;
+    }
+
+    for (i = 0; i < TOWER_TYPE_COUNT; i++) {
+        if (ui_rect_contains(ui_tower_button_rect(i), x, y)) {
+            ev->type = UI_EVENT_SELECT_TYPE;
+            ev->index = i;
+            return true;
+        }
+    }
+
+    towerIndex = panel_tower_index(app);
+    if (towerIndex >= 0 && towerIndex < g->towerCount && g->towers[towerIndex].active) {
+        if (ui_rect_contains(ui_upgrade_rect(), x, y)) {
+            ev->type = UI_EVENT_UPGRADE;
+            return true;
+        }
+        if (ui_rect_contains(ui_sell_rect(), x, y)) {
+            ev->type = UI_EVENT_SELL;
+            return true;
+        }
+    }
+
+    if (g->phase == PHASE_BUILD && ui_rect_contains(ui_next_wave_rect(), x, y)) {
+        ev->type = UI_EVENT_NEXT_WAVE;
+        return true;
+    }
+
+    return false;
+}
