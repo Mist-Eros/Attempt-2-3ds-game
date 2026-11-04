@@ -20,6 +20,10 @@
  *
  * The header speed/pause badges are the single touch control for those two
  * actions in every play phase; the wave panel shows progress and stats only.
+ *
+ * Maze building: the info panel labels the cursor cell "ROAD" when it lies on
+ * the live BFS path and says whether building there is legal; the core owns
+ * the actual rerouting and the top screen redraws the road from g->path.
  */
 #ifndef UI_H
 #define UI_H

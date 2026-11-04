@@ -29,25 +29,30 @@
 #define BOARD_H ((float)GRID_ROWS * BOARD_CELL)     /* 195 */
 #define HUD_H BOARD_Y                               /* top HUD strip height */
 
-/* ---- palette (sampled from the original LOE2D game) ------------------- */
+/* ---- palette -----------------------------------------------------------
+ * Tuned for the 240p, glossy, often-outdoors 3DS LCD: every colour used for
+ * actual TEXT sits at >= ~0.75 perceived luminance against the dark board, and
+ * hierarchy is carried by size/weight/colour hue instead of dimming.  The
+ * "muted"/"dim" names are historical; both are now light, they just differ in
+ * emphasis.  Shape-only colours (path, cell, grid, glows) keep the dark look. */
 static const GfxColor COL_WHITE      = { 1.00f, 1.00f, 1.00f, 1.00f };
-static const GfxColor COL_PANEL      = { 0.04f, 0.04f, 0.10f, 0.95f };
-static const GfxColor COL_PANEL_SOLID= { 0.04f, 0.04f, 0.10f, 1.00f };
-static const GfxColor COL_BORDER     = { 0.15f, 0.15f, 0.30f, 0.40f };
-static const GfxColor COL_BORDER_HI  = { 0.30f, 0.30f, 0.55f, 0.60f };
-static const GfxColor COL_GOLD       = { 1.00f, 0.80f, 0.20f, 1.00f };
-static const GfxColor COL_GOLD_SOFT  = { 1.00f, 0.90f, 0.40f, 1.00f };
-static const GfxColor COL_MUTED      = { 0.50f, 0.50f, 0.70f, 0.65f };
-static const GfxColor COL_DIM        = { 0.38f, 0.38f, 0.58f, 0.55f };
-static const GfxColor COL_RED        = { 1.00f, 0.20f, 0.20f, 1.00f };
-static const GfxColor COL_GREEN      = { 0.20f, 0.90f, 0.25f, 1.00f };
+static const GfxColor COL_PANEL      = { 0.05f, 0.05f, 0.12f, 0.96f };
+static const GfxColor COL_PANEL_SOLID= { 0.05f, 0.05f, 0.12f, 1.00f };
+static const GfxColor COL_BORDER     = { 0.22f, 0.22f, 0.42f, 0.65f };
+static const GfxColor COL_BORDER_HI  = { 0.45f, 0.45f, 0.70f, 0.80f };
+static const GfxColor COL_GOLD       = { 1.00f, 0.82f, 0.24f, 1.00f };
+static const GfxColor COL_GOLD_SOFT  = { 1.00f, 0.92f, 0.45f, 1.00f };
+static const GfxColor COL_MUTED      = { 0.86f, 0.88f, 0.96f, 0.95f };  /* secondary text */
+static const GfxColor COL_DIM        = { 0.80f, 0.82f, 0.92f, 0.92f };  /* tertiary text */
+static const GfxColor COL_RED        = { 1.00f, 0.40f, 0.36f, 1.00f };
+static const GfxColor COL_GREEN      = { 0.35f, 1.00f, 0.42f, 1.00f };
 static const GfxColor COL_PATH       = { 0.26f, 0.15f, 0.06f, 1.00f };
-static const GfxColor COL_PATH_EDGE  = { 0.38f, 0.25f, 0.10f, 0.85f };
+static const GfxColor COL_PATH_EDGE  = { 0.40f, 0.27f, 0.11f, 0.90f };
 static const GfxColor COL_CELL       = { 0.05f, 0.05f, 0.08f, 1.00f };
 static const GfxColor COL_GRIDLINE   = { 0.14f, 0.14f, 0.22f, 0.30f };
-static const GfxColor COL_YELLOW     = { 1.00f, 1.00f, 0.30f, 1.00f };
-static const GfxColor COL_BUILD_TAG  = { 1.00f, 1.00f, 0.40f, 1.00f };
-static const GfxColor COL_WAVE_TAG   = { 0.20f, 0.90f, 0.20f, 1.00f };
+static const GfxColor COL_YELLOW     = { 1.00f, 1.00f, 0.35f, 1.00f };
+static const GfxColor COL_BUILD_TAG  = { 1.00f, 1.00f, 0.45f, 1.00f };
+static const GfxColor COL_WAVE_TAG   = { 0.50f, 1.00f, 0.55f, 1.00f };
 
 /* Element colours, kept identical to game_tower_spec()/game_enemy_spec()
  * unless the core content tables say otherwise.  Indexed by Element. */
@@ -60,6 +65,13 @@ static const GfxColor COL_ELEMENT_GLOW[TOWER_TYPE_COUNT] = {
     { 0.95f, 0.30f, 0.10f, 1.00f },
     { 0.10f, 0.50f, 0.95f, 1.00f },
     { 0.10f, 0.90f, 0.30f, 1.00f }
+};
+/* Lightened element colours for element NAMES / stats text; the saturated
+ * COL_ELEMENT values stay for the glyphs themselves. */
+static const GfxColor COL_ELEMENT_TEXT[TOWER_TYPE_COUNT] = {
+    { 1.00f, 0.70f, 0.62f, 1.00f },   /* fire   */
+    { 0.64f, 0.82f, 1.00f, 1.00f },   /* water  */
+    { 0.58f, 1.00f, 0.62f, 1.00f }    /* forest */
 };
 
 /* ------------------------------------------------------------------------ */

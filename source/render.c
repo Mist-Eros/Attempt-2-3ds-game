@@ -149,9 +149,17 @@ void art_leaf(float cx, float cy, float size, GfxColor color)
                     cx, cx + s * 0.3f, cx + s * 0.8f, cx + s * 0.7f };
     float ys[8] = { cy - s, cy - s * 0.3f, cy + s * 0.2f, cy + s * 0.6f,
                     cy + s * 0.4f, cy + s * 0.6f, cy + s * 0.2f, cy - s * 0.3f };
+    float stemHeight = s * 0.8f;
 
+    /* Fill first, then the detail, so the glyph never depends on the detail
+     * pass.  The stem is a 1 px rect (not gfx_line) so the forest glyph uses
+     * the same primitive family as fire/water. */
     poly_fill(xs, ys, 8, color);
-    gfx_line(cx, cy - s * 0.5f, cx, cy + s * 0.3f, 1.0f, rgba(0.0f, 0.0f, 0.0f, 0.25f));
+
+    if (stemHeight < 1.0f)
+        stemHeight = 1.0f;
+    gfx_fill_rect(floorf(cx), cy - s * 0.5f, 1.0f, stemHeight,
+                  rgba(0.0f, 0.0f, 0.0f, 0.22f));
 }
 
 void art_star(float cx, float cy, float size, GfxColor color)
@@ -306,12 +314,12 @@ void render_menu_top(const App *app)
 
         art_glow(cx, cy, 30.0f, glow, 0.20f);
         art_element_colored(cx, cy, 14.0f, i, color);
-        text_centered(cx, 168.0f, 1.0f, rgba(color.r, color.g, color.b, 0.8f),
+        text_centered(cx, 168.0f, 1.0f, COL_ELEMENT_TEXT[i],
                       game_tower_spec(i) != NULL ? game_tower_spec(i)->name : "");
     }
 
     /* "press start" prompt */
-    pulse = 0.62f + 0.38f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
+    pulse = 0.82f + 0.18f * (0.5f + 0.5f * sinf(app->menuTime * 3.0f));
     width = gfx_text_width("PRESS A OR TAP START", 1.0f) + 18.0f;
     x = floorf((float)TOP_W * 0.5f - width * 0.5f);
     gfx_fill_rect(x, 190.0f, width, 18.0f, rgba(0.04f, 0.04f, 0.10f, 0.85f));
@@ -320,7 +328,7 @@ void render_menu_top(const App *app)
     text_centered(200.0f, 195.0f, 1.0f,
                   rgba(1.0f, 1.0f, 1.0f, pulse), "PRESS A OR TAP START");
 
-    text_centered(200.0f, 222.0f, 1.0f, rgba(0.34f, 0.34f, 0.55f, 0.55f),
+    text_centered(200.0f, 222.0f, 1.0f, rgba(0.74f, 0.77f, 0.90f, 0.85f),
                   "A NATIVE 3DS REMAKE");
 }
 
@@ -709,7 +717,7 @@ static void draw_cursor(const App *app)
     }
 
     /* green = can build here, yellow = legal but unaffordable, white = tower,
-     * dim = road / blocked cell */
+     * dim = blocked cell (start/goal, or the placement would seal the route) */
     if (tower >= 0)
         edge = rgba(1.0f, 1.0f, 1.0f, 0.45f);
     else if (canPlace && affordable)
@@ -732,6 +740,64 @@ static void draw_cursor(const App *app)
                   rgba(1.0f, 1.0f, 1.0f, 0.75f));
 }
 
+/* ------------------------------------------------------------------------ */
+/* Path entrance / exit markers                                              */
+/* ------------------------------------------------------------------------ */
+
+/* One small arrow pointing along the direction of travel.  The dark backing
+ * triangle keeps it readable on the brown road.  Cheap: 2 quads. */
+static void draw_portal_arrow(float cx, float cy, float dx, float dy, GfxColor color)
+{
+    float len = sqrtf(dx * dx + dy * dy);
+    float ux = 1.0f;
+    float uy = 0.0f;
+    float px, py;
+    float apexX, apexY, baseX, baseY;
+
+    if (len > 0.0001f) {
+        ux = dx / len;
+        uy = dy / len;
+    }
+    px = -uy;
+    py = ux;
+
+    apexX = cx + ux * 6.0f;
+    apexY = cy + uy * 6.0f;
+    baseX = cx - ux * 3.0f;
+    baseY = cy - uy * 3.0f;
+
+    gfx_fill_triangle(apexX + ux, apexY + uy,
+                      baseX + px * 5.5f, baseY + py * 5.5f,
+                      baseX - px * 5.5f, baseY - py * 5.5f,
+                      rgba(0.0f, 0.0f, 0.0f, 0.55f));
+    gfx_fill_triangle(apexX, apexY,
+                      baseX + px * 4.5f, baseY + py * 4.5f,
+                      baseX - px * 4.5f, baseY - py * 4.5f, color);
+}
+
+/* Green arrow where creeps enter the board, red arrow where they leave.  The
+ * road is re-routed by the core when towers are built on it, so these have to
+ * follow g->path.pts rather than fixed board corners. */
+static void draw_portal_markers(const Game *g)
+{
+    Vec2 first, second, last, prev;
+
+    if (g->path.count < 1)
+        return;
+
+    first = g->path.pts[0];
+    last = g->path.pts[g->path.count - 1];
+    second = g->path.count > 1 ? g->path.pts[1] : first;
+    prev = g->path.count > 1 ? g->path.pts[g->path.count - 2] : last;
+
+    draw_portal_arrow(cell_px_x(first.x), cell_px_y(first.y),
+                      second.x - first.x, second.y - first.y,
+                      rgba(0.35f, 1.00f, 0.45f, 1.0f));
+    draw_portal_arrow(cell_px_x(last.x), cell_px_y(last.y),
+                      last.x - prev.x, last.y - prev.y,
+                      rgba(1.00f, 0.35f, 0.30f, 1.0f));
+}
+
 void render_game_top(const App *app)
 {
     const Game *g = &app->game;
@@ -741,6 +807,7 @@ void render_game_top(const App *app)
 
     draw_hud(app);
     draw_board(app, pathMap);
+    draw_portal_markers(g);
     draw_range_previews(app);
     draw_towers(app);
     draw_beams(app);

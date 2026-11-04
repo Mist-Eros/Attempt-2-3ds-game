@@ -17,6 +17,12 @@
  * Placement note: the top screen is not touch sensitive on a 3DS, so towers
  * are built by moving the D-pad cursor and pressing A.  The bottom palette is
  * still tappable because it selects which tower type A will build.
+ *
+ * Maze building: towers may stand on the road, and the core re-runs a BFS after
+ * every build/sell, so a buildable road cell is a positive hint ("ROAD - BUILD
+ * HERE TO REROUTE THEM").  Only the fixed entrance/exit cells and placements
+ * that would seal the exit are refused by game_can_place_at(); the panel shows
+ * "ROAD - THIS CELL CAN'T BE BLOCKED" for those.
  */
 #include <math.h>
 #include <stdio.h>
@@ -164,8 +170,8 @@ static void draw_button_frame(UiRect r, GfxColor fill, GfxColor border, bool ena
     GfxColor edge = border;
 
     if (!enabled) {
-        body.a *= 0.45f;
-        edge.a *= 0.45f;
+        body.a *= 0.58f;
+        edge.a *= 0.58f;
     }
 
     gfx_fill_rect(r.x + 2.0f, r.y + 2.0f, r.w, r.h, rgba(0.0f, 0.0f, 0.0f, 0.35f));
@@ -220,10 +226,11 @@ static void draw_preview_row(float x, float y, int count, bool elite, int elemen
             element = 0;
         color = COL_ELEMENT[element];
         art_element_colored(x + 8.0f, y + 4.0f, 4.0f, element, color);
+        color = COL_ELEMENT_TEXT[element];
     }
 
     snprintf(buf, sizeof(buf), "x%d", count);
-    gfx_text(x + 18.0f, y, 1.0f, rgba(color.r, color.g, color.b, 0.90f), buf);
+    gfx_text(x + 18.0f, y, 1.0f, color, buf);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -253,7 +260,7 @@ static void draw_menu(const App *app)
 
         art_glow(cx, cy, 26.0f, glow, 0.22f);
         art_element_colored(cx, cy, 12.0f, i, color);
-        text_centered(cx, 110.0f, 1.0f, rgba(color.r, color.g, color.b, 0.85f),
+        text_centered(cx, 110.0f, 1.0f, COL_ELEMENT_TEXT[i],
                       spec != NULL ? spec->name : "");
     }
 
@@ -279,7 +286,7 @@ static void draw_menu(const App *app)
     snprintf(buf, sizeof(buf), "D-PAD TO BUILD - TOUCH FOR BUTTONS");
     text_centered(160.0f, 198.0f, 1.0f, COL_DIM, buf);
     text_centered(160.0f, 214.0f, 1.0f, COL_DIM, "SELECT SPEED - START PAUSE");
-    text_centered(160.0f, 228.0f, 1.0f, rgba(0.30f, 0.30f, 0.50f, 0.60f),
+    text_centered(160.0f, 228.0f, 1.0f, rgba(0.72f, 0.75f, 0.88f, 0.85f),
                   "A NATIVE 3DS REMAKE");
 }
 
@@ -375,7 +382,7 @@ static void draw_tower_palette(const App *app)
         art_coin(r.x + 41.0f, r.y + 35.0f, 4.0f);
         snprintf(buf, sizeof(buf), "%d", cost);
         gfx_text(r.x + 48.0f, r.y + 31.0f, 1.0f,
-                 g->gold >= cost ? COL_GOLD : rgba(0.75f, 0.55f, 0.20f, 0.65f), buf);
+                 g->gold >= cost ? COL_GOLD : rgba(0.90f, 0.82f, 0.60f, 0.95f), buf);
     }
 }
 
@@ -401,7 +408,9 @@ static void draw_upgrade_sell(const App *app, int towerIndex)
     draw_button_frame(up, rgba(0.10f, 0.35f, 0.15f, 1.0f),
                       rgba(0.30f, 0.90f, 0.40f, 0.80f), canUpgrade);
     text_centered(up.x + up.w * 0.5f, up.y + 11.0f, 1.0f,
-                  canUpgrade ? COL_WHITE : COL_DIM, buf);
+                  upgradeCost < 0 ? COL_GOLD_SOFT
+                                  : (canUpgrade ? COL_WHITE : COL_DIM),
+                  buf);
 
     if (sellValue < 0)
         sellValue = 0;
@@ -428,6 +437,7 @@ static void draw_info_panel(const App *app)
         const TowerSpec *spec = game_tower_spec(tower->element);
         GfxColor color = spec != NULL ? art_spec_color(spec->color, 1.0f)
                                       : COL_ELEMENT[tower->element % TOWER_TYPE_COUNT];
+        GfxColor nameColor = COL_ELEMENT_TEXT[tower->element % TOWER_TYPE_COUNT];
         float damage = 0.0f;
         float fireRate = 1.0f;
         float range = 0.0f;
@@ -441,7 +451,7 @@ static void draw_info_panel(const App *app)
 
         snprintf(buf, sizeof(buf), "%s LV.%d", spec != NULL ? spec->name : "TOWER",
                  (int)tower->level);
-        gfx_text(30.0f, 92.0f, 1.0f, color, buf);
+        gfx_text(30.0f, 92.0f, 1.0f, nameColor, buf);
 
         snprintf(buf, sizeof(buf), "DMG %.1f   RNG %.1f   DPS %.1f",
                  (double)damage, (double)range, (double)dps);
@@ -450,21 +460,33 @@ static void draw_info_panel(const App *app)
         draw_upgrade_sell(app, towerIndex);
     } else {
         bool isPath = cell_is_path(g, g->cursorCol, g->cursorRow);
+        bool canPlace = game_can_place_at(g, g->cursorCol, g->cursorRow,
+                                          g->selectedType);
         const TowerSpec *selectedSpec = game_tower_spec(g->selectedType);
         const char *name = selectedSpec != NULL ? selectedSpec->name : "TOWER";
         int cost = selectedSpec != NULL ? selectedSpec->cost : 0;
 
         snprintf(buf, sizeof(buf), "CURSOR C%d R%d", g->cursorCol, g->cursorRow);
         gfx_text(10.0f, 93.0f, 1.0f, COL_MUTED, buf);
-        text_right(308.0f, 93.0f, 1.0f, isPath ? COL_GOLD : COL_DIM,
-                   isPath ? "PATH CELL" : "EMPTY CELL");
+        text_right(308.0f, 93.0f, 1.0f,
+                   isPath ? COL_GOLD : COL_DIM, isPath ? "ROAD" : "EMPTY CELL");
 
-        if (isPath)
-            snprintf(buf, sizeof(buf), "PATH CELL - ENEMIES WALK HERE");
-        else
+        /* Maze building: a tower on the road forces the BFS to find a detour,
+         * so a buildable road cell is a *positive* hint, not a warning.  Cells
+         * the core refuses (start/goal, or a placement that would seal the
+         * route) read as blocked instead. */
+        if (canPlace && isPath) {
+            gfx_text(10.0f, 108.0f, 1.0f, rgba(0.60f, 1.00f, 0.65f, 1.0f),
+                     "ROAD - BUILD HERE TO REROUTE THEM");
+        } else if (canPlace) {
             snprintf(buf, sizeof(buf), "A BUILDS %s FOR %dG", name, cost);
-        gfx_text(10.0f, 108.0f, 1.0f,
-                 isPath ? COL_GOLD : COL_WHITE, buf);
+            gfx_text(10.0f, 108.0f, 1.0f, COL_WHITE, buf);
+        } else if (isPath) {
+            gfx_text(10.0f, 108.0f, 1.0f, COL_MUTED,
+                     "ROAD - THIS CELL CAN'T BE BLOCKED");
+        } else {
+            gfx_text(10.0f, 108.0f, 1.0f, COL_MUTED, "CAN'T BUILD HERE RIGHT NOW");
+        }
 
         gfx_text(10.0f, 124.0f, 1.0f, COL_DIM,
                  "L/R TYPE   A BUILD   B CLEAR");
@@ -535,9 +557,9 @@ static void draw_build_section(const App *app)
                   "NEXT WAVE");
     snprintf(buf, sizeof(buf), "WAVE %d OF %d", g->wave, g->totalWaves);
     text_centered(next.x + next.w * 0.5f, next.y + 34.0f, 1.0f,
-                  rgba(0.85f, 1.00f, 0.90f, 0.90f), buf);
+                  rgba(0.90f, 1.00f, 0.92f, 0.95f), buf);
     text_centered(next.x + next.w * 0.5f, next.y + 48.0f, 1.0f,
-                  rgba(0.75f, 0.95f, 0.80f, 0.70f), "PRESS WHEN READY");
+                  rgba(0.86f, 0.98f, 0.88f, 0.92f), "PRESS WHEN READY");
 
     /* incoming composition */
     panel_with_title(preview, "INCOMING");
@@ -564,8 +586,10 @@ static void draw_wave_section(const App *app)
 
     fill_panel(panel);
 
-    snprintf(buf, sizeof(buf), "WAVE %d IN PROGRESS", g->wave);
-    gfx_text(14.0f, 163.0f, 1.0f, COL_WHITE, buf);
+    /* scale-2 headline for the one thing the player checks most often */
+    snprintf(buf, sizeof(buf), "WAVE %d", g->wave);
+    gfx_text(14.0f, 162.0f, 2.0f, COL_WHITE, buf);
+    text_right(306.0f, 168.0f, 1.0f, COL_MUTED, "IN PROGRESS");
 
     game_wave_preview(g, &fire, &water, &forest, &elite);
     total = fire + water + forest + elite;
@@ -579,35 +603,35 @@ static void draw_wave_section(const App *app)
         frac = 1.0f;
 
     /* chunky progress bar: readable at arm's length on the 240p LCD */
-    gfx_fill_rect(14.0f, 174.0f, 292.0f, 16.0f, rgba(0.08f, 0.08f, 0.14f, 1.0f));
-    gfx_fill_rect(16.0f, 176.0f, 288.0f * frac, 12.0f,
+    gfx_fill_rect(14.0f, 181.0f, 292.0f, 15.0f, rgba(0.10f, 0.10f, 0.18f, 1.0f));
+    gfx_fill_rect(16.0f, 183.0f, 288.0f * frac, 11.0f,
                   rgba(0.95f, 0.60f, 0.15f, 1.0f));
-    gfx_outline_rect(14.0f, 174.0f, 292.0f, 16.0f, 1.0f,
-                     rgba(0.30f, 0.30f, 0.55f, 0.80f));
+    gfx_outline_rect(14.0f, 181.0f, 292.0f, 15.0f, 1.0f,
+                     rgba(0.45f, 0.45f, 0.72f, 0.85f));
     snprintf(buf, sizeof(buf), "CLEARED %d%%   LEFT %d", (int)(frac * 100.0f + 0.5f),
              remaining);
-    text_centered(160.0f, 178.0f, 1.0f, rgba(1.0f, 1.0f, 1.0f, 0.92f), buf);
+    text_centered(160.0f, 184.0f, 1.0f, rgba(1.0f, 1.0f, 1.0f, 0.96f), buf);
 
     snprintf(buf, sizeof(buf), "ALIVE %d", g->enemiesAlive);
-    gfx_text(14.0f, 196.0f, 1.0f, COL_WHITE, buf);
+    gfx_text(14.0f, 200.0f, 1.0f, COL_WHITE, buf);
     snprintf(buf, sizeof(buf), "QUEUED %d", g->enemiesToSpawn);
-    gfx_text(112.0f, 196.0f, 1.0f, COL_MUTED, buf);
+    gfx_text(112.0f, 200.0f, 1.0f, COL_MUTED, buf);
     snprintf(buf, sizeof(buf), "KILLS %d", g->kills);
-    gfx_text(212.0f, 196.0f, 1.0f, COL_MUTED, buf);
+    gfx_text(212.0f, 200.0f, 1.0f, COL_MUTED, buf);
 
     snprintf(buf, sizeof(buf), "LEAKS %d", g->leaks);
-    gfx_text(14.0f, 208.0f, 1.0f, g->leaks > 0 ? COL_RED : COL_MUTED, buf);
+    gfx_text(14.0f, 212.0f, 1.0f, g->leaks > 0 ? COL_RED : COL_MUTED, buf);
     snprintf(buf, sizeof(buf), "TOWERS %d", g->towerCount);
-    gfx_text(112.0f, 208.0f, 1.0f, COL_MUTED, buf);
+    gfx_text(112.0f, 212.0f, 1.0f, COL_MUTED, buf);
     {
         int seconds = (int)g->timeTotal;
         if (seconds < 0)
             seconds = 0;
         snprintf(buf, sizeof(buf), "TIME %d:%02d", seconds / 60, seconds % 60);
-        gfx_text(212.0f, 208.0f, 1.0f, COL_MUTED, buf);
+        gfx_text(212.0f, 212.0f, 1.0f, COL_MUTED, buf);
     }
 
-    text_centered(160.0f, 222.0f, 1.0f, COL_DIM,
+    text_centered(160.0f, 224.0f, 1.0f, COL_DIM,
                   "START: PAUSE    SELECT: SPEED");
 }
 
