@@ -1,0 +1,7 @@
+# host preview build output (regenerate with the Makefile)
+*.exe
+*.pdb
+*.o
+
+# generated screenshots (the repository-root .gitignore also ignores out/)
+out*/
