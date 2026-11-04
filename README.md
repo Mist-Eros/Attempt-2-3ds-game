@@ -63,12 +63,13 @@ tower you placed most recently.
 
 ## Status
 
-Playable end to end: 25 waves, all three towers, upgrades, lives, game over, victory. What's still
-missing:
+Playable end to end: 25 waves, all three towers, upgrades, lives, game over, victory. It boots at a
+stable 60 fps in the Azahar emulator, which is where all my testing so far happened — real-hardware
+input and GPU output are the next thing I'll verify on the actual console. What's still missing:
 
 - [ ] sound effects and music (the audio layer is stubbed, the original `.wav`s are still around)
 - [ ] real-hardware playtest tuning — balance is currently the old LÖVE numbers on a hand-built road
-- [ ] a `git tag`ged release with a built `.3dsx` (see below)
+- [ ] general polish: another pass on the menus, and the bottom panel starts to feel cramped at 320px
 
 ## Building it
 
@@ -82,8 +83,9 @@ make
 ```
 
 That produces `ElementalDefense.3dsx`, `ElementalDefense.elf` and the `.smdh` metadata. Copy the
-`.3dsx` to your SD card and you're away. There's also a GitHub Actions workflow that builds the same
-artifact on every push if you'd rather not install the toolchain.
+`.3dsx` to your SD card and you're away. There's a GitHub Actions workflow in `.github/workflows/`
+that builds the same artifact on every push — it's set up, though GitHub was slow to assign runners
+to a brand-new repo, so the `.3dsx` attached to the release was built locally.
 
 ## How it's put together
 
