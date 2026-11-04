@@ -14,8 +14,14 @@ The old attempt for posterity: [tower-defense-3ds-psvita-project-attempt](https:
 
 ## What the game is
 
-A grid tower defense on a 26x13 board. Creeps crawl along a fixed serpentine road from the left edge
-to the right, you build towers next to the road to stop them, and every kill pays for the next tower.
+A grid tower defense on a 26x13 board. Creeps crawl along a road from the left edge to the right, you
+build towers to stop them, and every kill pays for the next tower.
+
+The important bit: **you build on the road, not just next to it.** Every tower you drop on the path
+makes the creeps recalculate their route around it, so the game is about walling off the short way and
+forcing them through a long winding detour that keeps them in range of more towers. The route is a BFS
+shortest path and gets recomputed after every build and every sell; creeps already on the road follow
+the new route. Block the road completely and the game won't let you place the tower.
 
 Three elemental towers — **Fire**, **Water**, **Forest** — with a rock-paper-scissors damage table:
 
@@ -35,10 +41,11 @@ you can build as long as you like before calling the next one in.
 
 ## Screenshots
 
-Straight out of Azahar (top screen on top, touchscreen below). These are from the CI-built `.3dsx`, so
-they're what the release actually looks like.
+Top screen above, touchscreen below. The menu is a capture of the actual `.3dsx` running in Azahar;
+the two gameplay shots come from the game's PC preview harness, which renders through the same
+`game.h`/`gfx.h` frame code as the 3DS backend (so the layout is exactly what the console draws).
 
-| Menu | Build phase | Wave in progress |
+| Menu (in Azahar) | Build phase, roadway rerouted | Creeps walking the detour |
 |---|---|---|
 | ![menu](docs/screenshots/menu.png) | ![build phase](docs/screenshots/build.png) | ![combat](docs/screenshots/wave.png) |
 
@@ -64,11 +71,15 @@ Tapping a placed tower with your finger on the bottom screen isn't a thing yet (
 the top screen, which isn't touch) — the D-pad cursor is how you select one, or the panel shows the
 tower you placed most recently.
 
+Playing under an emulator (I use Azahar)? I map **WASD** to the d-pad, **U/H/J/K** to X/Y/B/A and
+**Q/I** to L/R there; Start/Select are M/N.
+
 ## Status
 
-Playable end to end: 25 waves, all three towers, upgrades, lives, game over, victory. It boots at a
-stable 60 fps in the Azahar emulator, which is where all my testing so far happened — real-hardware
-input and GPU output are the next thing I'll verify on the actual console. What's still missing:
+Playable end to end: maze building on the road, 25 waves, all three towers, upgrades, lives, game
+over, victory. It boots at a stable 60 fps in the Azahar emulator, which is where all my testing so far
+happened — real-hardware input and GPU output are the next thing I'll verify on the actual console.
+What's still missing:
 
 - [ ] sound effects and music (the audio layer is stubbed, the original `.wav`s are still around)
 - [ ] real-hardware playtest tuning — balance is currently the old LÖVE numbers on a hand-built road

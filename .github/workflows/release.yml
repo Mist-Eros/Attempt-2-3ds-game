@@ -31,7 +31,15 @@ jobs:
         with:
           name: Elemental Defense ${{ github.ref_name }}
           body: |
-            Elemental Defense for the Nintendo 3DS.
+            Elemental Defense for the Nintendo 3DS - a maze-building tower defense.
+
+            Build towers ON the road to force the creeps into longer detours; the route is a BFS
+            shortest path and is recalculated every time you build or sell a tower.
+
+            - 25 waves, fire / water / forest towers with the elemental damage multipliers
+            - 10 upgrade levels per tower, 20 lives, elite waves every 5th wave
+            - touch controls on the bottom screen, d-pad + buttons fallback
+            - runs at 60 fps in Azahar
 
             Download `ElementalDefense.3dsx` (or the zip), copy it to the `/3ds/` folder on your
             SD card, then launch it from the Homebrew Launcher.
