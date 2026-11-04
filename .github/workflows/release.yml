@@ -41,7 +41,9 @@ jobs:
               SLAG (+50% damage taken), EXPLOSIVE (AoE, 3x slower)
             - 25 waves, 10 upgrade levels, 20 lives, elite waves every 5th wave
             - touch controls on the bottom screen, d-pad + buttons fallback
-            - Borderlands-style title screen, five element emblems, hazard-stripe UI
+            - Borderlands-style title screen, chamfered gold in-game UI, five element emblems
+            - sound: looping music + sfx from the original game (needs DSP1 firmware, silent if missing)
+            - custom Homebrew Launcher icon
             - runs at 60 fps in Azahar
 
             Download `ElementalDefense.3dsx` (or the zip), copy it to the `/3ds/` folder on your

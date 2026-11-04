@@ -1,8 +1,8 @@
 # Attempt 2: Elemental Defense for the 3DS
 
 A tower defense game I originally wrote in LÖVE2D, rebuilt from scratch in C so it actually runs
-properly on a Nintendo 3DS — with a Borderlands-style layered damage model and a BL2-inspired
-title screen full of element emblems.
+properly on a Nintendo 3DS — with a Borderlands-style layered damage model, a BL2-inspired title
+screen and in-game UI, and sound.
 
 The first attempt ran the LÖVE version through LovePotion. It booted! And then crawled at a few
 frames per second with half the playfield off-screen and touch controls fighting LÖVE's mouse
@@ -87,16 +87,27 @@ tower you placed most recently.
 Playing under an emulator (I use Azahar)? I map **WASD** to the d-pad, **U/H/J/K** to X/Y/B/A and
 **Q/I** to L/R there; Start/Select are M/N.
 
+### Sound
+
+The 3DS build has audio: looping menu/game music plus sound effects for building, selling, upgrading,
+lasers, enemies dying, wave starts, leaks, game over and victory. The effects and music are converted
+from the original LÖVE project's assets (the two little sting sounds were generated); `tools/make_audio.py`
+does the conversion into raw PCM that gets linked into the `.3dsx`.
+
+One caveat: the 3DS audio service needs the **DSP1 firmware** loaded. On Luma3DS that usually means
+having DSP1 installed/enabled; if it's missing, the game detects `ndspInit()` failing and just runs
+silently instead of crashing.
+
 ## Status
 
 Playable end to end: maze building on the road, 25 waves, six damage types against layered enemies,
-status effects, upgrades, lives, game over, victory. The v0.4 pass redesigned the title screen and
+status effects, upgrades, lives, game over, victory, sound, and a custom Homebrew Launcher icon. The v0.4 pass redesigned the title screen and
 gave the palette/board Borderlands-style element emblems drawn as original pixel art. It boots at a stable 60 fps in the Azahar
 emulator, which is where all my testing so far happened — real-hardware input and GPU output are the
 next thing I'll verify on the actual console. What's still missing:
 
-- [ ] sound effects and music (the audio layer is stubbed, the original `.wav`s are still around)
 - [ ] real-hardware playtest tuning — the balance only exists in the sim so far
+- [ ] real-hardware audio check (DSP1 caveat above) — sound was only verified by linking, not by listening
 - [ ] general polish: another pass on the menus, and the bottom panel starts to feel cramped at 320px
 
 ## Building it
@@ -128,9 +139,13 @@ source/render.c  top screen: board, towers, layered enemies, status effects, bea
 source/ui.c      bottom screen: six-tower palette, upgrade/sell, wave control
 source/app.c     the scene state machine and input → action mapping
 source/main.c    aptMainLoop / hid polling / frame timing
+source/audio_3ds.c  libctru ndsp mixer (SFX pool + looping music) for the 3DS build
+source/audio.c   portable no-op fallback so the PC preview harness links without audio
+data/            raw PCM16 clips converted from the original sounds (linked in via bin2o)
 tests/           the core's unit tests (46 of them), built and run on the host
 tools/sim.c      headless auto-play balance sim (mixed army, maze AI, GUN-only control)
 tools/preview/   a tiny PC software renderer that dumps PNG frames - my "emulator"
+tools/make_audio.py / make_icon.py   regenerate data/ and the launcher icon
 ```
 
 The core is plain C99 with no dynamic allocation, everything in fixed pools. It's deterministic from
